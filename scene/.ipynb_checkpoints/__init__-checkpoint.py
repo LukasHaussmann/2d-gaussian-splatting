@@ -12,14 +12,11 @@
 import os
 import random
 import json
-
-from scene.corr_init import init_gaussians_with_corr
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
-import torch
 
 class Scene:
 
@@ -39,6 +36,8 @@ class Scene:
             else:
                 self.loaded_iter = load_iteration
             print("Loading trained model at iteration {}".format(self.loaded_iter))
+        else:
+            self.init_with_corr()
 
         self.train_cameras = {}
         self.test_cameras = {}
@@ -83,9 +82,8 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            #self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
-            init_gaussians_with_corr(self.gaussians, self,device=torch.device('cuda') )
-
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+            
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
