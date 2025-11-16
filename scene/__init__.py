@@ -83,8 +83,8 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            #self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
-            init_gaussians_with_corr(self.gaussians, self,device=torch.device('cuda') )
+            point_cloud = init_gaussians_with_corr(self.gaussians, self,device=torch.device('cuda') )
+            self.gaussians.create_from_pcd(point_cloud, self.cameras_extent)
 
 
     def save(self, iteration):
