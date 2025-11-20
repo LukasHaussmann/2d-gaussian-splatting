@@ -1,6 +1,7 @@
 from romatch import roma_outdoor, roma_indoor
 import torch
 import numpy as np
+import open3d as o3d
 from matplotlib import pyplot as plt
 from PIL import Image
 from scipy.cluster.vq import kmeans, vq
@@ -500,7 +501,7 @@ def select_best_keypoints(
 
 def init_gaussians_with_corr(gaussians, scene, device):
     print("init_gaussians_with_corr")
-    roma_model = roma_indoor(device=device)
+    roma_model = roma_outdoor(device=device)
     roma_model.upsample_preds = False
     roma_model.symmetric = False
     M = 15_000
@@ -620,9 +621,22 @@ def init_gaussians_with_corr(gaussians, scene, device):
             all_new_colors.append(kptsA_color / 255.)
 
     all_new_xyz = np.concatenate(all_new_xyz, axis=0)
+    all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
+
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
     random_normals = np.random.randn(len(all_new_colors[0]), 3)        # Gaussian samples
     random_normals /= np.linalg.norm(random_normals, axis=1, keepdims=True)
 
+    print(all_new_xyz.shape)
+    """
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+    o3d.utility.Vector3dVector()
+    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=32))
+    pc.orient_normals_consistent_tangent_plane(50)
+
+    normals = np.asarray(pc.normals)
+    print(normals.shape)
+    """
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=random_normals)
