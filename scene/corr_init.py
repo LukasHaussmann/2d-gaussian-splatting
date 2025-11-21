@@ -504,7 +504,7 @@ def init_gaussians_with_corr(gaussians, scene, device):
     roma_model = roma_outdoor(device=device)
     roma_model.upsample_preds = False
     roma_model.symmetric = False
-    M = 15_000
+    M = 25_000
     upper_thresh = roma_model.sample_thresh
     expansion_factor = 1
     keypoint_fit_error_tolerance = 0.01#cfg.proj_err_tolerance
