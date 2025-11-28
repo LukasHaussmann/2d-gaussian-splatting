@@ -6,7 +6,7 @@ channels:
   - defaults
 dependencies:
   - ffmpeg=4.2.2
-  - pillow=10.2.0
+  - pillow
   - pip=23.3.1
   - python=3.10
   - pytorch=2.5.1
@@ -17,7 +17,7 @@ dependencies:
     - open3d==0.19.0
     - mediapy==1.1.2
     - lpips==0.1.4
-    - scikit-image==0.21.0
+    - scikit-image
     - tqdm==4.66.2
     - trimesh==4.3.2
     - submodules/diff-surfel-rasterization

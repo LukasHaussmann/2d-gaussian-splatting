@@ -11,6 +11,7 @@
 
 import os
 import torch
+import time
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -30,6 +31,7 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
+    #start_time = time.time()
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
@@ -48,6 +50,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
+
+    """ for convergence frame capture
+    test_cameras = scene.getTestCameras()
+    fixed_cam = test_cameras[1]     # always same camera angle
+    progress_dir = os.path.join(scene.model_path, "progress")
+    os.makedirs(progress_dir, exist_ok=True)
+    frame_idx = 0
+    snapshot_interval = 50
+    """
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -132,8 +143,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
                 
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
+                if iteration < opt.densify_until_iter and iteration % 10 == 0:
+                    opacities_new = torch.log(torch.exp(gaussians._opacity.data) * 0.99)
+                    gaussians._opacity.data = opacities_new
+                #if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                #    gaussians.reset_opacity()
             #"""
 
             # Optimizer step
@@ -144,7 +158,46 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+            """
+            if iteration % snapshot_interval == 0:
+                test_render = render(fixed_cam, gaussians, pipe, background)["render"]
+                save_path = os.path.join(progress_dir, f"{frame_idx:05d}.png")
+                
+                # convert to uint8 and save
+                img = (torch.clamp(test_render, 0, 1) * 255).byte().permute(1, 2, 0).cpu().numpy()
+                
+                import cv2
+                img_cv = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+                
+                text = f"Iter: {iteration:d}"
+                 # Compute elapsed seconds
+                #elapsed_sec = time.time() - start_time
+                # or: text = f"Iter: {iteration:d}   Time: {iteration * iter_ms / 1000:.1f}s"
+                
+                cv2.putText(
+                    img_cv, text,
+                    (20, 60),                 # position
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    1.2, (255, 255, 255), 3,  # white text, bold
+                    cv2.LINE_AA
+                )
+                
+                cv2.putText(
+                    img_cv, f"Time: {elapsed_sec:.1f}s",
+                    (20, 110), cv2.FONT_HERSHEY_SIMPLEX,
+                    1.3, (255, 255, 255), 3, cv2.LINE_AA
+                )
+                
 
+
+                # Convert back to RGB for saving with imageio
+                img_cv = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGB)
+                
+                import imageio
+                imageio.imwrite(save_path, img_cv)
+                frame_idx += 1
+            """
+        
         with torch.no_grad():        
             if network_gui.conn == None:
                 network_gui.try_connect(dataset.render_items)

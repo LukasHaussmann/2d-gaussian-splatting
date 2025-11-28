@@ -504,7 +504,7 @@ def init_gaussians_with_corr(gaussians, scene, device):
     roma_model = roma_outdoor(device=device)
     roma_model.upsample_preds = False
     roma_model.symmetric = False
-    M = 25_000
+    M = 15_000
     upper_thresh = roma_model.sample_thresh
     expansion_factor = 1
     keypoint_fit_error_tolerance = 0.01#cfg.proj_err_tolerance
@@ -520,7 +520,7 @@ def init_gaussians_with_corr(gaussians, scene, device):
     # Find the k-closest vectors for each vector
     viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
     closest_indices = k_closest_vectors(viewpoint_cam_all, NUM_NNS_PER_REFERENCE)
-    print("Indices of k-closest vectors for each vector:\n", closest_indices)
+    #print("Indices of k-closest vectors for each vector:\n", closest_indices)
 
     closest_indices_selected = closest_indices[:, :].detach().cpu().numpy()
 
@@ -625,18 +625,20 @@ def init_gaussians_with_corr(gaussians, scene, device):
 
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
-    random_normals = np.random.randn(len(all_new_colors[0]), 3)        # Gaussian samples
-    random_normals /= np.linalg.norm(random_normals, axis=1, keepdims=True)
+    #random_normals = np.random.randn(len(all_new_colors[0]), 3)        # Gaussian samples
+    #random_normals /= np.linalg.norm(random_normals, axis=1, keepdims=True)
 
-    print(all_new_xyz.shape)
-    """
+    #print(all_new_xyz.shape)
+    #"""
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(all_new_xyz)
     o3d.utility.Vector3dVector()
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=32))
+    print("estimating normals")
+    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=50))
     pc.orient_normals_consistent_tangent_plane(50)
 
     normals = np.asarray(pc.normals)
-    print(normals.shape)
-    """
-    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=random_normals)
+
+    print("done estimating normals")
+    #"""
+    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
