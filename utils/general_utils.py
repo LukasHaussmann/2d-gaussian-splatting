@@ -160,18 +160,27 @@ def create_rotation_matrix_from_direction_vector_batch(direction_vectors):
 #     return rotations
 
 
-def colormap(img, cmap='jet'):
+# -- changed for colab implementation --
+
+def colormap(data, cmap='turbo'):
     import matplotlib.pyplot as plt
-    W, H = img.shape[:2]
-    dpi = 300
-    fig, ax = plt.subplots(1, figsize=(H/dpi, W/dpi), dpi=dpi)
-    im = ax.imshow(img, cmap=cmap)
+    import numpy as np
+
+    fig = plt.figure(frameon=False)
+    ax = plt.Axes(fig, [0., 0., 1., 1.])
     ax.set_axis_off()
-    fig.colorbar(im, ax=ax)
-    fig.tight_layout()
+    fig.add_axes(ax)
+
+    ax.imshow(data, cmap=cmap)
     fig.canvas.draw()
-    data = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-    data = data.reshape(fig.canvas.get_width_height()[::-1] + (3,))
-    img = torch.from_numpy(data / 255.).float().permute(2,0,1)
-    plt.close()
-    return img
+
+    # Read the canvas as ARGB bytes and reshape into (H, W, 4)
+    buf = np.frombuffer(fig.canvas.tostring_argb(), dtype=np.uint8)
+    width, height = fig.canvas.get_width_height()
+    buf = buf.reshape((height, width, 4))
+
+    # Drop alpha (A,R,G,B -> R,G,B)
+    rgb = buf[..., 1:]
+
+    plt.close(fig)
+    return rgb

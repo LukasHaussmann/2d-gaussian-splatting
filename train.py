@@ -245,7 +245,12 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc, renderArgs):
+    import numpy as np
+    import torch
+    from utils.general_utils import colormap
+
+    # Scalars
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -255,43 +260,110 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        validation_configs = (
+            {'name': 'test', 'cameras': scene.getTestCameras()},
+            {
+                'name': 'train',
+                'cameras': [
+                    scene.getTrainCameras()[idx % len(scene.getTrainCameras())]
+                    for idx in range(5, 30, 5)
+                ],
+            },
+        )
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+
                 for idx, viewpoint in enumerate(config['cameras']):
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
-                    image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if tb_writer and (idx < 5):
-                        from utils.general_utils import colormap
-                        depth = render_pkg["surf_depth"]
-                        norm = depth.max()
-                        depth = depth / norm
-                        depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
-                        tb_writer.add_images(config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
 
+                    # Rendered RGB in [0,1], ground truth
+                    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
+                    if tb_writer and (idx < 5):
+                        # ---------- DEPTH IMAGE ----------
+                        depth = render_pkg["surf_depth"]  # torch tensor
+                        norm = depth.max()
+                        depth = depth / (norm + 1e-8)
+
+                        # depth: (1, H, W) -> numpy HWC via colormap -> torch NCHW
+                        depth_np = depth.detach().cpu().numpy()[0]   # (H, W)
+                        depth_rgb = colormap(depth_np, cmap='turbo') # (H, W, 3), uint8
+                        depth_rgb = np.array(depth_rgb, copy=True)
+                        depth_t = torch.from_numpy(depth_rgb).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+                        depth_t = depth_t.float() / 255.0
+
+                        # ---------- RENDERED IMAGE ----------
+                        img_np = image.detach().cpu().numpy()[0]     # (3, H, W) or (H, W, 3) depending on code
+                        if img_np.ndim == 3 and img_np.shape[0] == 3:
+                            # (C, H, W) -> (H, W, C)
+                            img_np = np.transpose(img_np, (1, 2, 0))
+                        img_rgb = colormap(img_np)                   # (H, W, 3)
+                        img_rgb = np.array(img_rgb, copy=True)
+                        image_t = torch.from_numpy(img_rgb).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+                        image_t = image_t.float() / 255.0
+
+                        tb_writer.add_images(
+                            config['name'] + "_view_{}/depth".format(viewpoint.image_name),
+                            depth_t,
+                            global_step=iteration,
+                        )
+                        tb_writer.add_images(
+                            config['name'] + "_view_{}/render".format(viewpoint.image_name),
+                            image_t,
+                            global_step=iteration,
+                        )
+
+                        # ---------- NORMALS / ALPHA / DIST ----------
                         try:
-                            rend_alpha = render_pkg['rend_alpha']
+                            rend_alpha = render_pkg['rend_alpha']          # expect (1,1,H,W) or similar
                             rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
                             surf_normal = render_pkg["surf_normal"] * 0.5 + 0.5
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name), rend_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name), surf_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name), rend_alpha[None], global_step=iteration)
 
-                            rend_dist = render_pkg["rend_dist"]
-                            rend_dist = colormap(rend_dist.cpu().numpy()[0])
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
-                        except:
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name),
+                                rend_normal[None],
+                                global_step=iteration,
+                            )
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name),
+                                surf_normal[None],
+                                global_step=iteration,
+                            )
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name),
+                                rend_alpha[None],
+                                global_step=iteration,
+                            )
+
+                            # rend_dist: tensor -> numpy -> colormap -> torch NCHW
+                            rend_dist = render_pkg["rend_dist"]            # torch tensor
+                            dist_np = rend_dist.detach().cpu().numpy()[0]  # (H, W)
+                            dist_rgb = colormap(dist_np)                   # (H, W, 3)
+                            dist_rgb = np.array(dist_rgb, copy=True)
+                            dist_t = torch.from_numpy(dist_rgb).permute(2, 0, 1).unsqueeze(0)
+                            dist_t = dist_t.float() / 255.0
+
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name),
+                                dist_t,
+                                global_step=iteration,
+                            )
+                        except Exception:
                             pass
 
+                        # ---------- GROUND TRUTH ----------
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name),
+                                gt_image[None],
+                                global_step=iteration,
+                            )
 
+                    # accumulate metrics
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 
