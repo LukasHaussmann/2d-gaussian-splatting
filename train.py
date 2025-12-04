@@ -29,6 +29,44 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+# -- New function for automated rendering of images at certain checkpoints --
+def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
+    render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
+    os.makedirs(render_path, exist_ok=True)
+    
+    psnr_accum = 0.0
+    ssim_accum = 0.0
+    
+    # Render a subset (e.g., first 5 views) to save time
+    # Or render specific fixed views if you defined them
+    subset_views = views[:5] 
+
+    for idx, view in enumerate(subset_views):
+        # Render
+        render_pkg = render(view, gaussians, pipeline, background)
+        image = render_pkg["render"]
+        
+        # Save Normal and Depth maps as well!
+        if "rend_normal" in render_pkg:
+            normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).permute(1, 2, 0)
+            from torchvision.utils import save_image
+            save_image(render_pkg["rend_normal"] * 0.5 + 0.5, os.path.join(render_path, f"{view.image_name}_normal.png"))
+
+        # Save RGB
+        gt = view.original_image[0:3, :, :]
+        from torchvision.utils import save_image
+        save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
+        
+        # Calc Metrics
+        psnr_accum += psnr(image, gt).mean().double()
+        ssim_accum += ssim(image, gt).mean().double()
+
+    # Log to text file
+    with open(os.path.join(model_path, "progress_log.txt"), "a") as f:
+        f.write(f"Iter {iteration}: PSNR={psnr_accum/len(subset_views):.4f}, SSIM={ssim_accum/len(subset_views):.4f}\n")
+    
+    print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {psnr_accum/len(subset_views):.4f}")
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     #start_time = time.time()
@@ -127,11 +165,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
 
+            # -- New: running automated eval at custom interval --
+            if iteration % 1000 == 0: # Or define a custom interval
+                print(f"\n[ITER {iteration}] Running automated evaluation...")
+                test_cameras = scene.getTestCameras()
+                render_checkpoint(scene.model_path, iteration, test_cameras, gaussians, pipe, background)
+            # -- End Change --
+            
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
 
             # Densification
             #"""
