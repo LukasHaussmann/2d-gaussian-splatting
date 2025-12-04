@@ -23,6 +23,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import torchvision
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -31,14 +32,16 @@ except ImportError:
 
 # -- New function for automated rendering of images at certain checkpoints --
 def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
+    """
+    Automated evaluation: Renders specific views and saves RGB + Normals.
+    """
     render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
     os.makedirs(render_path, exist_ok=True)
     
     psnr_accum = 0.0
     ssim_accum = 0.0
     
-    # Render a subset (e.g., first 5 views) to save time
-    # Or render specific fixed views if you defined them
+    # Render first 5 views for speed
     subset_views = views[:5] 
 
     for idx, view in enumerate(subset_views):
@@ -46,27 +49,32 @@ def render_checkpoint(model_path, iteration, views, gaussians, pipeline, backgro
         render_pkg = render(view, gaussians, pipeline, background)
         image = render_pkg["render"]
         
-        # Save Normal and Depth maps as well!
+        # --- ROBUST FIX: Force device and Clamp ---
+        image = torch.clamp(image, 0.0, 1.0).to("cuda")
+        gt = torch.clamp(view.original_image[0:3, :, :], 0.0, 1.0).to("cuda")
+        # ------------------------------------------
+
+        # Save Normal Maps (visualize as RGB)
         if "rend_normal" in render_pkg:
-            normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).permute(1, 2, 0)
-            from torchvision.utils import save_image
-            save_image(render_pkg["rend_normal"] * 0.5 + 0.5, os.path.join(render_path, f"{view.image_name}_normal.png"))
+            # rend_normal is [-1, 1], convert to [0, 1] for saving
+            normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).to("cuda")
+            torchvision.utils.save_image(normal_vis, os.path.join(render_path, f"{view.image_name}_normal.png"))
 
         # Save RGB
-        gt = view.original_image[0:3, :, :]
-        from torchvision.utils import save_image
-        save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
+        torchvision.utils.save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
         
-        # Calc Metrics
+        # Calc Metrics (Now guaranteed to be on CUDA)
         psnr_accum += psnr(image, gt).mean().double()
         ssim_accum += ssim(image, gt).mean().double()
 
-    # Log to text file
-    with open(os.path.join(model_path, "progress_log.txt"), "a") as f:
+    # Log metrics
+    log_file = os.path.join(model_path, "progress_log.txt")
+    with open(log_file, "a") as f:
         f.write(f"Iter {iteration}: PSNR={psnr_accum/len(subset_views):.4f}, SSIM={ssim_accum/len(subset_views):.4f}\n")
     
     print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {psnr_accum/len(subset_views):.4f}")
 
+    
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     #start_time = time.time()
@@ -171,7 +179,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 test_cameras = scene.getTestCameras()
                 render_checkpoint(scene.model_path, iteration, test_cameras, gaussians, pipe, background)
             # -- End Change --
-            
+
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))

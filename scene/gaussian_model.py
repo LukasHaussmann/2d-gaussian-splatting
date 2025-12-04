@@ -120,6 +120,45 @@ class GaussianModel:
     def oneupSHdegree(self):
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
+    
+    # -- New function to align initial rotation with computed normals --
+    def align_vector_to_rotation(normals):
+        """
+        Converts surface normals (N, 3) into rotation quaternions (N, 4)
+        assuming the Gaussian's local Z-axis should align with the normal.
+        """
+        normals = normals / (torch.norm(normals, dim=1, keepdim=True) + 1e-9)
+        
+        # We want to rotate local Z (0,0,1) to align with 'normal'
+        # using the smallest rotation (quaternion).
+        # Z axis
+        z_axis = torch.zeros_like(normals)
+        z_axis[:, 2] = 1.0
+        
+        # Dot product
+        dot = torch.sum(z_axis * normals, dim=1)
+        
+        # Cross product (rotation axis)
+        cross = torch.cross(z_axis, normals, dim=1)
+        
+        # Quaternion construction (q_w, q_x, q_y, q_z)
+        # Formula: q = [sqrt(2(1+dot)), cross_x, cross_y, cross_z] / norm
+        # Simplified half-angle construction
+        
+        # Handle parallel vectors (dot == 1 or -1) case logic is complex, 
+        # but for general point clouds this approximation usually works:
+        
+        s = torch.sqrt(2 * (1 + dot)) + 1e-9
+        w = 0.5 * s
+        x = cross[:, 0] / s
+        y = cross[:, 1] / s
+        z = cross[:, 2] / s
+        
+        quats = torch.stack([w, x, y, z], dim=1)
+        # Normalize
+        quats = quats / (torch.norm(quats, dim=1, keepdim=True) + 1e-9)
+        
+        return quats
 
     def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float):
         self.spatial_lr_scale = spatial_lr_scale
@@ -133,7 +172,20 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
-        rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+        # THIS line initializes random rotations, ignoring estimated normals
+        #rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+
+        # NEW:
+        if pcd.normals is not None and len(pcd.normals) > 0:
+            print("Initializing Rotations from EDGS Normals...")
+            # Convert numpy normals to cuda tensor
+            normals = torch.tensor(np.asarray(pcd.normals)).float().cuda()
+            # Use the helper function (make sure it is defined above!)
+            rots = self.align_vector_to_rotation(normals)
+        else:
+            print("No normals found. Using Random Rotations.")
+            rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
+        # -- End of change --
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
