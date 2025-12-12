@@ -30,12 +30,6 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-# --- NEW IMPORT FOR LPIPS ---
-try:
-    from lpipsPyTorch import lpips
-except ImportError:
-    import lpips
-
 # -- New function for automated rendering of images at certain checkpoints --
 def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
     """
@@ -48,12 +42,6 @@ def render_checkpoint(model_path, iteration, views, gaussians, pipeline, backgro
     # Initialize Metrics
     psnr_accum = 0.0
     ssim_accum = 0.0
-    lpips_accum = 0.0
-    
-    # Initialize LPIPS model (VGG)
-    # We initialize it here to avoid passing it through the training loop, 
-    # though for strict efficiency it could be initialized once outside.
-    lpips_fn = lpips.LPIPS(net='vgg').to("cuda")
     
     # Render first 5 views for speed
     subset_views = views[:5] 
@@ -80,22 +68,17 @@ def render_checkpoint(model_path, iteration, views, gaussians, pipeline, backgro
         # --- Metrics Calculation ---
         psnr_accum += psnr(image, gt).mean().double()
         ssim_accum += ssim(image, gt).mean().double()
-        
-        # LPIPS requires inputs in [-1, 1] range
-        # image is [0, 1], so we normalize: (x * 2) - 1
-        lpips_accum += lpips_fn((image * 2 - 1).unsqueeze(0), (gt * 2 - 1).unsqueeze(0)).mean().double()
 
     # Average metrics
     avg_psnr = psnr_accum / len(subset_views)
     avg_ssim = ssim_accum / len(subset_views)
-    avg_lpips = lpips_accum / len(subset_views)
 
     # Log metrics
     log_file = os.path.join(model_path, "progress_log.txt")
     with open(log_file, "a") as f:
-        f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}, LPIPS={avg_lpips:.4f}\n")
+        f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}\n")
     
-    print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}, LPIPS: {avg_lpips:.4f}")
+    print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}")
     
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
