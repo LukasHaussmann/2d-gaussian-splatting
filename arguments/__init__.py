@@ -55,6 +55,13 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+
+        self.matches_per_ref = 25_000
+        self.nns_per_ref = 3
+        self.proj_err_tolerance = 0.01
+        self.normal_estimate_knn = 20
+        self.initialize_normals = True
+        
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -86,6 +93,7 @@ class OptimizationParams(ParamGroup):
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
         self.opacity_cull = 0.005
+        
 
         self.densification_interval = 100
         self.opacity_reset_interval = 30000

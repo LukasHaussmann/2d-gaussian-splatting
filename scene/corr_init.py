@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from romatch.utils import get_tuple_transform_ops
 from utils.sh_utils import RGB2SH
 from utils.graphics_utils import BasicPointCloud
+from arguments import ModelParams
 
 def pairwise_distances(matrix):
     """
@@ -499,19 +500,19 @@ def select_best_keypoints(
 
     return NNs_triangulated_points_selected, np.min(NNs_errors_proj, axis=0)
 
-def init_gaussians_with_corr(gaussians, scene, device):
+def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     print("init_gaussians_with_corr")
     roma_model = roma_outdoor(device=device)
     roma_model.upsample_preds = False
     roma_model.symmetric = False
-    M = 15_000
+    M = args.matches_per_ref
     upper_thresh = roma_model.sample_thresh
     expansion_factor = 1
-    keypoint_fit_error_tolerance = 0.01#cfg.proj_err_tolerance
+    keypoint_fit_error_tolerance = args.proj_err_tolerance
     visualizations = {}
     viewpoint_stack = scene.getTrainCameras().copy()
     NUM_REFERENCE_FRAMES = min(180, len(viewpoint_stack))
-    NUM_NNS_PER_REFERENCE = 3#len(viewpoint_stack)
+    NUM_NNS_PER_REFERENCE = args.nns_per_ref
     # Select cameras using K-means
     viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
 
@@ -625,20 +626,15 @@ def init_gaussians_with_corr(gaussians, scene, device):
 
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
-    #random_normals = np.random.randn(len(all_new_colors[0]), 3)        # Gaussian samples
-    #random_normals /= np.linalg.norm(random_normals, axis=1, keepdims=True)
-
-    #print(all_new_xyz.shape)
-    #"""
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(all_new_xyz)
     o3d.utility.Vector3dVector()
     print("estimating normals")
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=50))
-    pc.orient_normals_consistent_tangent_plane(50)
+    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
 
     normals = np.asarray(pc.normals)
 
     print("done estimating normals")
-    #"""
+    
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
