@@ -9,7 +9,7 @@ Y_COLUMNS = ["accuracy", "completeness", "overall"]  # the 3 metrics you want to
 OUTPUT_FILE = "combined_plot.png"
 # ======================
 
-def main():
+def plot_metrics():
     csv_files = [f for f in os.listdir(DATA_DIR) if f.endswith(".csv")]
     if not csv_files:
         print("No CSV files found.")
@@ -46,4 +46,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    plot_metrics()
