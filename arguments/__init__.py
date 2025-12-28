@@ -60,7 +60,9 @@ class ModelParams(ParamGroup):
         self.nns_per_ref = 3
         self.proj_err_tolerance = 0.01
         self.normal_estimate_knn = 20
-        self.initialize_normals = True
+        self.random_normals = False
+        self.roma_model = "Indoor"
+        self.fast_init = False
         
         super().__init__(parser, "Loading Parameters", sentinel)
 

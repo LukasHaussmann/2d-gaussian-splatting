@@ -12,6 +12,8 @@ from romatch.utils import get_tuple_transform_ops
 from utils.sh_utils import RGB2SH
 from utils.graphics_utils import BasicPointCloud
 from arguments import ModelParams
+import time
+from collections import defaultdict
 
 def pairwise_distances(matrix):
     """
@@ -502,7 +504,12 @@ def select_best_keypoints(
 
 def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     print("init_gaussians_with_corr")
-    roma_model = roma_outdoor(device=device)
+    if args.roma_model == "Outdoor":
+        roma_model = roma_outdoor(device=device)
+    elif args.roma_model == "Indoor":
+        roma_model = roma_indoor(device=device)
+    else:
+        raise Exception("Unknown roma model parameter")
     roma_model.upsample_preds = False
     roma_model.symmetric = False
     M = args.matches_per_ref
@@ -637,4 +644,244 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
 
     print("done estimating normals")
     
+    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+
+def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=False, output_dict={}):
+    """
+    Extracts keypoints and corresponding colors from a source image (imA) and a single target image (imB).
+
+    Args:
+        imA: Source image as a NumPy array (H_A, W_A, C).
+        imB: Target image as a NumPy array (H_B, W_B, C).
+        matches: Matches in normalized coordinates (torch.Tensor).
+        roma_model: Roma model instance for keypoint operations.
+        verbose: If True, outputs intermediate visualizations.
+    Returns:
+        kptsA_np: Keypoints in imA (normalized).
+        kptsB_np: Keypoints in imB (normalized).
+        kptsA_color: Colors of keypoints in imA.
+        kptsB_color: Colors of keypoints in imB.
+    """
+    H_A, W_A, _ = imA.shape
+    H_B, W_B, _ = imB.shape
+
+    # Convert matches to pixel coordinates
+    # Matches format: (B, 4) = (x1_norm, y1_norm, x2_norm, y2_norm)
+    kptsA = matches[:, :2]  # [N, 2]
+    kptsB = matches[:, 2:]  # [N, 2]
+
+    # Scale normalized coordinates [-1,1] to pixel coordinates
+    kptsA_pix = torch.zeros_like(kptsA)
+    kptsB_pix = torch.zeros_like(kptsB)
+
+    # Important! [Normalized to pixel space]
+    kptsA_pix[:, 0] = (kptsA[:, 0] + 1) * (W_A - 1) / 2
+    kptsA_pix[:, 1] = (kptsA[:, 1] + 1) * (H_A - 1) / 2
+
+    kptsB_pix[:, 0] = (kptsB[:, 0] + 1) * (W_B - 1) / 2
+    kptsB_pix[:, 1] = (kptsB[:, 1] + 1) * (H_B - 1) / 2
+
+    kptsA_np = kptsA_pix.detach().cpu().numpy()
+    kptsB_np = kptsB_pix.detach().cpu().numpy()
+
+    # Extract colors
+    kptsA_x = np.round(kptsA_np[:, 0]).astype(int)
+    kptsA_y = np.round(kptsA_np[:, 1]).astype(int)
+    kptsB_x = np.round(kptsB_np[:, 0]).astype(int)
+    kptsB_y = np.round(kptsB_np[:, 1]).astype(int)
+
+    kptsA_color = imA[np.clip(kptsA_y, 0, H_A-1), np.clip(kptsA_x, 0, W_A-1)]
+    kptsB_color = imB[np.clip(kptsB_y, 0, H_B-1), np.clip(kptsB_x, 0, W_B-1)]
+
+    # Normalize keypoints into [-1, 1] for downstream triangulation
+    kptsA_np_norm = np.zeros_like(kptsA_np)
+    kptsB_np_norm = np.zeros_like(kptsB_np)
+
+    kptsA_np_norm[:, 0] = kptsA_np[:, 0] / (W_A - 1) * 2.0 - 1.0
+    kptsA_np_norm[:, 1] = kptsA_np[:, 1] / (H_A - 1) * 2.0 - 1.0
+
+    kptsB_np_norm[:, 0] = kptsB_np[:, 0] / (W_B - 1) * 2.0 - 1.0
+    kptsB_np_norm[:, 1] = kptsB_np[:, 1] / (H_B - 1) * 2.0 - 1.0
+
+    return kptsA_np_norm, kptsB_np_norm, kptsA_color, kptsB_color
+
+def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, verbose=False):
+    timings = defaultdict(list)
+
+    print("init_gaussians_with_corr")
+    if args.roma_model == "Outdoor":
+        roma_model = roma_outdoor(device=device)
+    elif args.roma_model == "Indoor":
+        roma_model = roma_indoor(device=device)
+    else:
+        raise Exception("Unknown roma model parameter")
+
+    roma_model.upsample_preds = False
+    roma_model.symmetric = False
+
+    M = args.matches_per_ref
+    upper_thresh = roma_model.sample_thresh
+    #scaling_factor = cfg.scaling_factor
+    expansion_factor = 1
+    keypoint_fit_error_tolerance = args.proj_err_tolerance
+    visualizations = {}
+    viewpoint_stack = scene.getTrainCameras().copy()
+    NUM_REFERENCE_FRAMES = min(180, len(viewpoint_stack))
+    NUM_NNS_PER_REFERENCE = 1  # Only ONE neighbor now!
+
+    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
+
+    selected_indices = select_cameras_kmeans(cameras=viewpoint_cam_all.detach().cpu().numpy(), K=NUM_REFERENCE_FRAMES)
+    selected_indices = sorted(selected_indices)
+
+    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
+    closest_indices = k_closest_vectors(viewpoint_cam_all, NUM_NNS_PER_REFERENCE)
+    closest_indices_selected = closest_indices[:, :].detach().cpu().numpy()
+
+    all_new_xyz = []
+    all_new_features_dc = []
+    all_new_features_rest = []
+    all_new_opacities = []
+    all_new_scaling = []
+    all_new_rotation = []
+    all_new_colors = []
+
+    # Dummy first pass to initialize model
+    with torch.no_grad():
+        viewpoint_cam1 = viewpoint_stack[0]
+        viewpoint_cam2 = viewpoint_stack[1]
+        imA = viewpoint_cam1.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imB = viewpoint_cam2.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imA = Image.fromarray(np.clip(imA * 255, 0, 255).astype(np.uint8))
+        imB = Image.fromarray(np.clip(imB * 255, 0, 255).astype(np.uint8))
+        warp, certainty_warp = roma_model.match(imA, imB, device=device)
+        del warp, certainty_warp
+        torch.cuda.empty_cache()
+
+    # Main Loop over source_idx
+    for source_idx in tqdm(sorted(selected_indices), desc="Profiling source frames"):
+
+        # =================== Step 1: Compute Warp and Certainty ===================
+        start = time.time()
+        viewpoint_cam1 = viewpoint_stack[source_idx]
+        NNs=closest_indices_selected.shape[1]
+        viewpoint_cam2 = viewpoint_stack[closest_indices_selected[source_idx, np.random.randint(NNs)]]
+        imA = viewpoint_cam1.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imB = viewpoint_cam2.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imA = Image.fromarray(np.clip(imA * 255, 0, 255).astype(np.uint8))
+        imB = Image.fromarray(np.clip(imB * 255, 0, 255).astype(np.uint8))
+        warp, certainty_warp = roma_model.match(imA, imB, device=device)
+
+        certainties_max = certainty_warp  # New manual sampling
+        timings['aggregation_warp_certainty'].append(time.time() - start)
+
+        # =================== Step 2: Good Samples Selection ===================
+        start = time.time()
+        certainty = certainties_max.reshape(-1).clone()
+        certainty[certainty > upper_thresh] = 1
+        good_samples = torch.multinomial(certainty, num_samples=min(expansion_factor * M, len(certainty)), replacement=False)
+        timings['good_samples_selection'].append(time.time() - start)
+
+        # =================== Step 3: Triangulate Keypoints ===================
+        reference_image_dict = {
+            "triangulated_points": [],
+            "triangulated_points_errors_proj1": [],
+            "triangulated_points_errors_proj2": []
+        }
+
+        start = time.time()
+        matches_NN = warp.reshape(-1, 4)[good_samples]
+
+        # Convert matches to pixel coordinates
+        kptsA_np, kptsB_np, kptsA_color, kptsB_color = extract_keypoints_and_colors_single(
+            np.array(imA).astype(np.uint8),
+            np.array(imB).astype(np.uint8),
+            matches_NN,
+            roma_model
+        )
+
+        proj_matrices_A = viewpoint_stack[source_idx].full_proj_transform
+        proj_matrices_B = viewpoint_stack[closest_indices_selected[source_idx, 0]].full_proj_transform
+
+        triangulated_points, triangulated_points_errors_proj1, triangulated_points_errors_proj2 = triangulate_points(
+            P1=torch.stack([proj_matrices_A] * M, axis=0),
+            P2=torch.stack([proj_matrices_B] * M, axis=0),
+            k1_x=kptsA_np[:M, 0], k1_y=kptsA_np[:M, 1],
+            k2_x=kptsB_np[:M, 0], k2_y=kptsB_np[:M, 1])
+
+        reference_image_dict["triangulated_points"].append(triangulated_points)
+        reference_image_dict["triangulated_points_errors_proj1"].append(triangulated_points_errors_proj1)
+        reference_image_dict["triangulated_points_errors_proj2"].append(triangulated_points_errors_proj2)
+        timings['triangulation_per_NN'].append(time.time() - start)
+
+        # =================== Step 4: Select Best Triangulated Points ===================
+        start = time.time()
+        NNs_triangulated_points_selected, NNs_triangulated_points_selected_proj_errors = select_best_keypoints(
+            NNs_triangulated_points=torch.stack(reference_image_dict["triangulated_points"], dim=0),
+            NNs_errors_proj1=np.stack(reference_image_dict["triangulated_points_errors_proj1"], axis=0),
+            NNs_errors_proj2=np.stack(reference_image_dict["triangulated_points_errors_proj2"], axis=0))
+        timings['select_best_keypoints'].append(time.time() - start)
+
+        # =================== Step 5: Create New Gaussians ===================
+        start = time.time()
+        viewpoint_cam1 = viewpoint_stack[source_idx]
+        N = len(NNs_triangulated_points_selected)
+        new_xyz = NNs_triangulated_points_selected[:, :-1]
+        all_new_xyz.append(new_xyz.cpu())
+        all_new_colors.append(kptsA_color / 255.)
+        #all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
+        #all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
+
+        mask_bad_points = torch.tensor(
+            NNs_triangulated_points_selected_proj_errors > keypoint_fit_error_tolerance,
+            dtype=torch.float32).unsqueeze(1).to(device)
+
+        #all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
+
+        #dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz, dim=1, ord=2)
+        #all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 3)))
+        #all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
+        timings['save_gaussians'].append(time.time() - start)
+
+    # =================== Final Densification Postfix ===================
+    start = time.time()
+    #all_new_xyz = torch.cat(all_new_xyz, dim=0)
+    all_new_xyz = np.concatenate(all_new_xyz, axis=0)
+    all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
+    all_new_colors = np.concatenate(all_new_colors, axis=0)
+    #all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
+    #new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
+    prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
+
+    """
+    gaussians.densification_postfix(
+        all_new_xyz[prune_mask].to(device),
+        all_new_features_dc[prune_mask].to(device),
+        torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
+        torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
+        torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
+        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device),
+        new_tmp_radii[prune_mask].to(device)
+    )
+    timings['final_densification_postfix'].append(time.time() - start)
+    """
+
+    # =================== Print Profiling Results ===================
+    print("\n=== Profiling Summary (average per frame) ===")
+    for key, times in timings.items():
+        print(f"{key:35s}: {sum(times) / len(times):.4f} sec (total {sum(times):.2f} sec)")
+
+    #return viewpoint_stack, closest_indices_selected, visualizations
+
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+    o3d.utility.Vector3dVector()
+    print("estimating normals")
+    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+
+    normals = np.asarray(pc.normals)
+
+    print("done estimating normals")
+
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
