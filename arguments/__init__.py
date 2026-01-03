@@ -58,12 +58,14 @@ class ModelParams(ParamGroup):
 
         self.matches_per_ref = 25_000
         self.nns_per_ref = 3
+        self.scaling_factor = 0.001
         self.proj_err_tolerance = 0.01
         self.normal_estimate_knn = 20
         self.random_normals = False
         self.roma_model = "Indoor"
-        self.fast_init = False
-        
+        self.fast_init = 0
+        self.gaussians_init = '2dgs'
+        self.estimate_normals = 1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

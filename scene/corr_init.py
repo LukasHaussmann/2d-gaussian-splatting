@@ -10,6 +10,7 @@ from tqdm import tqdm
 import torch.nn.functional as F
 from romatch.utils import get_tuple_transform_ops
 from utils.sh_utils import RGB2SH
+from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from arguments import ModelParams
 import time
@@ -515,6 +516,7 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     M = args.matches_per_ref
     upper_thresh = roma_model.sample_thresh
     expansion_factor = 1
+    scaling_factor = args.scaling_factor
     keypoint_fit_error_tolerance = args.proj_err_tolerance
     visualizations = {}
     viewpoint_stack = scene.getTrainCameras().copy()
@@ -625,14 +627,68 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
         N = len(NNs_triangulated_points_selected)
         with torch.no_grad():
             new_xyz = NNs_triangulated_points_selected[:, :-1]
-            all_new_xyz.append(new_xyz.cpu())  # seeked_splats
+            all_new_xyz.append(new_xyz)  # seeked_splats
             all_new_colors.append(kptsA_color / 255.)
+            all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
+            all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
+            # new version that sets points with large error invisible
+            # TODO: remove those points instead. However it doesn't affect the performance.
+            mask_bad_points = torch.tensor(
+                NNs_triangulated_points_selected_proj_errors > keypoint_fit_error_tolerance,
+                dtype=torch.float32).unsqueeze(1).to(device)
+            all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
 
-    all_new_xyz = np.concatenate(all_new_xyz, axis=0)
-    all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
+            dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz,
+                                                    dim=1, ord=2)
+            #all_new_scaling.append(torch.log(((dist_points_to_cam1) / 1. * scaling_factor).unsqueeze(1).repeat(1, 3)))
+            all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 2)))
+            all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
 
+
+    all_new_xyz = torch.cat(all_new_xyz, dim=0)
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
+    all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
+    new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
+    prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
+
+    if args.gaussians_init == '2dgs':
+        all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+        o3d.utility.Vector3dVector()
+        print("estimating normals")
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+
+        normals = np.asarray(pc.normals)
+        pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+        gaussians.create_from_pcd(pcd, scene.cameras_extent, False)
+    else:
+
+        N_splats_at_init = len(gaussians._xyz)
+
+        gaussians.densification_postfix(all_new_xyz[prune_mask].to(device),
+                                        all_new_features_dc[prune_mask].to(device),
+                                        torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
+                                        torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
+                                        torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
+                                        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
+                                        )
+
+        print("removing sfm gaussians")
+        with torch.no_grad():
+            N_splats_after_init = len(gaussians._xyz)
+            print("N_splats_after_init:", N_splats_after_init)
+            gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
+            mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
+                                 torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
+                                axis=0)
+        gaussians.prune_points(mask)
+
+    return viewpoint_stack, closest_indices_selected, visualizations
+
+    """
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(all_new_xyz)
     o3d.utility.Vector3dVector()
@@ -645,6 +701,7 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     print("done estimating normals")
     
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+    """
 
 def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=False, output_dict={}):
     """
@@ -708,7 +765,7 @@ def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=F
 def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, verbose=False):
     timings = defaultdict(list)
 
-    print("init_gaussians_with_corr")
+    print("init_gaussians_with_corr_fast")
     if args.roma_model == "Outdoor":
         roma_model = roma_outdoor(device=device)
     elif args.roma_model == "Indoor":
@@ -721,7 +778,7 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
 
     M = args.matches_per_ref
     upper_thresh = roma_model.sample_thresh
-    #scaling_factor = cfg.scaling_factor
+    scaling_factor = args.scaling_factor
     expansion_factor = 1
     keypoint_fit_error_tolerance = args.proj_err_tolerance
     visualizations = {}
@@ -827,52 +884,80 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
         viewpoint_cam1 = viewpoint_stack[source_idx]
         N = len(NNs_triangulated_points_selected)
         new_xyz = NNs_triangulated_points_selected[:, :-1]
-        all_new_xyz.append(new_xyz.cpu())
-        all_new_colors.append(kptsA_color / 255.)
-        #all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
-        #all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
+        all_new_xyz.append(new_xyz)
+        #all_new_colors.append(kptsA_color / 255.)
+        all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
+        all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
 
         mask_bad_points = torch.tensor(
             NNs_triangulated_points_selected_proj_errors > keypoint_fit_error_tolerance,
             dtype=torch.float32).unsqueeze(1).to(device)
 
-        #all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
+        all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
 
-        #dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz, dim=1, ord=2)
-        #all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 3)))
-        #all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
+        dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz, dim=1, ord=2)
+        all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 2)))
+        all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
         timings['save_gaussians'].append(time.time() - start)
 
     # =================== Final Densification Postfix ===================
     start = time.time()
-    #all_new_xyz = torch.cat(all_new_xyz, dim=0)
-    all_new_xyz = np.concatenate(all_new_xyz, axis=0)
-    all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
-    all_new_colors = np.concatenate(all_new_colors, axis=0)
-    #all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
-    #new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
+    all_new_xyz = torch.cat(all_new_xyz, dim=0)
+    #all_new_xyz = np.concatenate(all_new_xyz, axis=0)
+    #all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
+    #all_new_colors = np.concatenate(all_new_colors, axis=0)
+    all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
+    new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
     prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
 
-    """
+    if args.scale_init == '2dgs':
+        dist2 = torch.clamp_min(distCUDA2(all_new_xyz.float().cuda()), 0.0000001)
+        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+    else:
+        scales = torch.cat(all_new_scaling, dim=0)
+
+    N_splats_at_init = len(gaussians._xyz)
     gaussians.densification_postfix(
         all_new_xyz[prune_mask].to(device),
         all_new_features_dc[prune_mask].to(device),
         torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
         torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
-        torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
-        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device),
-        new_tmp_radii[prune_mask].to(device)
+        scales[prune_mask].to(device),
+        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
+        #new_tmp_radii[prune_mask].to(device)
     )
     timings['final_densification_postfix'].append(time.time() - start)
-    """
+    print("removing sfm gaussians")
+    with torch.no_grad():
+        N_splats_after_init = len(gaussians._xyz)
+        print("N_splats_after_init:", N_splats_after_init)
+        gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
+        mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
+                             torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
+                            axis=0)
+    gaussians.prune_points(mask)
+
+    if args.estimate_normals == 1:
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(all_new_xyz[prune_mask].cpu().numpy())
+        o3d.utility.Vector3dVector()
+        print("estimating normals")
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+        print("estimating normals done")
+
+        normals = torch.tensor(np.asarray(pc.normals)).float().cuda()
+        rots = gaussians.rotation_vector_from_normals(normals)
+        gaussians._rotation = torch.nn.Parameter(rots.requires_grad_(True))
 
     # =================== Print Profiling Results ===================
     print("\n=== Profiling Summary (average per frame) ===")
     for key, times in timings.items():
         print(f"{key:35s}: {sum(times) / len(times):.4f} sec (total {sum(times):.2f} sec)")
 
-    #return viewpoint_stack, closest_indices_selected, visualizations
+    return viewpoint_stack, closest_indices_selected, visualizations
 
+    """
     pc = o3d.geometry.PointCloud()
     pc.points = o3d.utility.Vector3dVector(all_new_xyz)
     o3d.utility.Vector3dVector()
@@ -885,3 +970,4 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
     print("done estimating normals")
 
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+    """
