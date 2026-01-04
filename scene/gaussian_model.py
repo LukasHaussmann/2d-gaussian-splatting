@@ -159,7 +159,7 @@ class GaussianModel:
         
         return quats
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, random_normals: bool):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, use_normals: bool):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
@@ -171,7 +171,7 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
-        if not random_normals:
+        if use_normals:
             normals = torch.tensor(np.asarray(pcd.normals)).float().cuda()
             rots = self.rotation_vector_from_normals(normals)
         else:

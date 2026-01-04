@@ -654,16 +654,19 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
 
     if args.gaussians_init == '2dgs':
         all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-        o3d.utility.Vector3dVector()
-        print("estimating normals")
-        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+        if args.estimate_normals == 1:
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+            o3d.utility.Vector3dVector()
+            print("estimating normals")
+            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
 
-        normals = np.asarray(pc.normals)
-        pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
-        gaussians.create_from_pcd(pcd, scene.cameras_extent, False)
+            normals = np.asarray(pc.normals)
+            pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+            gaussians.create_from_pcd(pcd, scene.cameras_extent, use_normals=True)
+        else:
+            gaussians.create_from_pcd(BasicPointCloud(points=all_new_xyz,colors=all_new_colors,normals=None), scene.cameras_extent, use_normals=False)
     else:
 
         N_splats_at_init = len(gaussians._xyz)
@@ -687,21 +690,6 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
         gaussians.prune_points(mask)
 
     return viewpoint_stack, closest_indices_selected, visualizations
-
-    """
-    pc = o3d.geometry.PointCloud()
-    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-    o3d.utility.Vector3dVector()
-    print("estimating normals")
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-
-    normals = np.asarray(pc.normals)
-
-    print("done estimating normals")
-    
-    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
-    """
 
 def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=False, output_dict={}):
     """
@@ -885,7 +873,7 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
         N = len(NNs_triangulated_points_selected)
         new_xyz = NNs_triangulated_points_selected[:, :-1]
         all_new_xyz.append(new_xyz)
-        #all_new_colors.append(kptsA_color / 255.)
+        all_new_colors.append(kptsA_color / 255.)
         all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
         all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
 
@@ -903,52 +891,61 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
     # =================== Final Densification Postfix ===================
     start = time.time()
     all_new_xyz = torch.cat(all_new_xyz, dim=0)
-    #all_new_xyz = np.concatenate(all_new_xyz, axis=0)
-    #all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
-    #all_new_colors = np.concatenate(all_new_colors, axis=0)
+    all_new_colors = np.concatenate(all_new_colors, axis=0)
     all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
     new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
     prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
 
-    if args.scale_init == '2dgs':
-        dist2 = torch.clamp_min(distCUDA2(all_new_xyz.float().cuda()), 0.0000001)
-        scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+    if args.gaussians_init == '2dgs':
+        all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
+        if args.estimate_normals == 1:
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+            o3d.utility.Vector3dVector()
+            print("estimating normals")
+            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+
+            normals = np.asarray(pc.normals)
+            pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+            gaussians.create_from_pcd(pcd, scene.cameras_extent, use_normals=True)
+        else:
+            gaussians.create_from_pcd(BasicPointCloud(points=all_new_xyz,colors=all_new_colors,normals=None), scene.cameras_extent, use_normals=False)
     else:
-        scales = torch.cat(all_new_scaling, dim=0)
+        N_splats_at_init = len(gaussians._xyz)
+        gaussians.densification_postfix(
+            all_new_xyz[prune_mask].to(device),
+            all_new_features_dc[prune_mask].to(device),
+            torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
+            torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
+            torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
+            torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
+            #new_tmp_radii[prune_mask].to(device)
+        )
+        print("removing sfm gaussians")
+        with torch.no_grad():
+            N_splats_after_init = len(gaussians._xyz)
+            print("N_splats_after_init:", N_splats_after_init)
+            gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
+            mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
+                                 torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
+                                axis=0)
+        gaussians.prune_points(mask)
 
-    N_splats_at_init = len(gaussians._xyz)
-    gaussians.densification_postfix(
-        all_new_xyz[prune_mask].to(device),
-        all_new_features_dc[prune_mask].to(device),
-        torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
-        torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
-        scales[prune_mask].to(device),
-        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
-        #new_tmp_radii[prune_mask].to(device)
-    )
+        if args.estimate_normals == 1:
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(all_new_xyz[prune_mask].cpu().numpy())
+            o3d.utility.Vector3dVector()
+            print("estimating normals")
+            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+            print("estimating normals done")
+
+            normals = torch.tensor(np.asarray(pc.normals)).float().cuda()
+            rots = gaussians.rotation_vector_from_normals(normals)
+            gaussians._rotation = torch.nn.Parameter(rots.requires_grad_(True))
+
     timings['final_densification_postfix'].append(time.time() - start)
-    print("removing sfm gaussians")
-    with torch.no_grad():
-        N_splats_after_init = len(gaussians._xyz)
-        print("N_splats_after_init:", N_splats_after_init)
-        gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
-        mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
-                             torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
-                            axis=0)
-    gaussians.prune_points(mask)
-
-    if args.estimate_normals == 1:
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(all_new_xyz[prune_mask].cpu().numpy())
-        o3d.utility.Vector3dVector()
-        print("estimating normals")
-        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-        print("estimating normals done")
-
-        normals = torch.tensor(np.asarray(pc.normals)).float().cuda()
-        rots = gaussians.rotation_vector_from_normals(normals)
-        gaussians._rotation = torch.nn.Parameter(rots.requires_grad_(True))
 
     # =================== Print Profiling Results ===================
     print("\n=== Profiling Summary (average per frame) ===")
@@ -956,18 +953,3 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
         print(f"{key:35s}: {sum(times) / len(times):.4f} sec (total {sum(times):.2f} sec)")
 
     return viewpoint_stack, closest_indices_selected, visualizations
-
-    """
-    pc = o3d.geometry.PointCloud()
-    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-    o3d.utility.Vector3dVector()
-    print("estimating normals")
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-
-    normals = np.asarray(pc.normals)
-
-    print("done estimating normals")
-
-    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
-    """

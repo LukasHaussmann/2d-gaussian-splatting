@@ -56,7 +56,7 @@ class ModelParams(ParamGroup):
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
 
-        self.matches_per_ref = 25_000
+        self.matches_per_ref = 15_000
         self.nns_per_ref = 3
         self.scaling_factor = 0.001
         self.proj_err_tolerance = 0.01
@@ -96,15 +96,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
-        self.normal_reg_from = 7000
-        self.dist_reg_from = 3000
+        self.normal_reg_from = 0
+        self.dist_reg_from = 1000
         self.opacity_cull = 0.005
         
 
         self.densification_interval = 100
         self.opacity_reset_interval = 30000
-        self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_from_iter = 0
+        self.densify_until_iter = 1_000
         self.densify_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
 

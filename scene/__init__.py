@@ -89,7 +89,7 @@ class Scene:
             else:
                 point_cloud = init_gaussians_with_corr(args, self.gaussians, self,device=torch.device('cuda'))
             """
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, args.random_normals)
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, False)
 
 
     def save(self, iteration):
