@@ -691,6 +691,145 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
 
     return viewpoint_stack, closest_indices_selected, visualizations
 
+def init_gaussians_with_corr_old(args : ModelParams, gaussians, scene, device):
+    print("init_gaussians_with_corr_old")
+    roma_model = roma_outdoor(device=device)
+    roma_model.upsample_preds = False
+    roma_model.symmetric = False
+    M = args.matches_per_ref
+    upper_thresh = roma_model.sample_thresh
+    expansion_factor = 1
+    keypoint_fit_error_tolerance = args.proj_err_tolerance
+    visualizations = {}
+    viewpoint_stack = scene.getTrainCameras().copy()
+    NUM_REFERENCE_FRAMES = min(180, len(viewpoint_stack))
+    NUM_NNS_PER_REFERENCE = args.nns_per_ref
+    # Select cameras using K-means
+    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
+
+    selected_indices = select_cameras_kmeans(cameras=viewpoint_cam_all.detach().cpu().numpy(), K=NUM_REFERENCE_FRAMES)
+    selected_indices = sorted(selected_indices)
+    # Find the k-closest vectors for each vector
+    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
+    closest_indices = k_closest_vectors(viewpoint_cam_all, NUM_NNS_PER_REFERENCE)
+    #print("Indices of k-closest vectors for each vector:\n", closest_indices)
+
+    closest_indices_selected = closest_indices[:, :].detach().cpu().numpy()
+
+    all_new_xyz = []
+    all_new_features_dc = []
+    all_new_features_rest = []
+    all_new_opacities = []
+    all_new_scaling = []
+    all_new_rotation = []
+    all_new_colors = []
+
+    # Run roma_model.match once to kinda initialize the model
+    with torch.no_grad():
+        viewpoint_cam1 = viewpoint_stack[0]
+        viewpoint_cam2 = viewpoint_stack[1]
+        imA = viewpoint_cam1.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imB = viewpoint_cam2.original_image.detach().cpu().numpy().transpose(1, 2, 0)
+        imA = Image.fromarray(np.clip(imA * 255, 0, 255).astype(np.uint8))
+        imB = Image.fromarray(np.clip(imB * 255, 0, 255).astype(np.uint8))
+        warp, certainty_warp = roma_model.match(imA, imB, device=device)
+        print("Once run full roma_model.match warp.shape:", warp.shape)
+        print("Once run full roma_model.match certainty_warp.shape:", certainty_warp.shape)
+        del warp, certainty_warp
+        torch.cuda.empty_cache()
+
+    for source_idx in tqdm(sorted(selected_indices)):
+        # 1. Compute keypoints and warping for all the neighboring views
+        with torch.no_grad():
+            # Call the aggregation function to get imA and imB_compound
+            certainties_max, warps_max, certainties_max_idcs, imA, imB_compound, certainties_all, warps_all = aggregate_confidences_and_warps(
+                viewpoint_stack=viewpoint_stack,
+                closest_indices=closest_indices_selected,
+                roma_model=roma_model,
+                source_idx=source_idx,
+                verbose=False, output_dict=visualizations
+            )
+
+        # Triangulate keypoints
+        with torch.no_grad():
+            matches = warps_max
+            certainty = certainties_max
+            certainty = certainty.clone()
+            certainty[certainty > upper_thresh] = 1
+            matches, certainty = (
+                matches.reshape(-1, 4),
+                certainty.reshape(-1),
+            )
+
+            # Select based on certainty elements with high confidence. These are basically all of
+            # kptsA_np.
+            good_samples = torch.multinomial(certainty,
+                                             num_samples=min(expansion_factor * M, len(certainty)),
+                                             replacement=False)
+        certainties_max, warps_max, certainties_max_idcs, imA, imB_compound, certainties_all, warps_all
+        reference_image_dict = {
+            "ref_image": imA,
+            "NNs_images": imB_compound,
+            "certainties_all": certainties_all,
+            "warps_all": warps_all,
+            "triangulated_points": [],
+            "triangulated_points_errors_proj1": [],
+            "triangulated_points_errors_proj2": []
+
+        }
+        with torch.no_grad():
+            for NN_idx in tqdm(range(len(warps_all))):
+                matches_NN = warps_all[NN_idx].reshape(-1, 4)[good_samples]
+
+                # Extract keypoints and colors
+                kptsA_np, kptsB_np, kptsB_proj_matrices_idcs, kptsA_color, kptsB_color = extract_keypoints_and_colors(
+                    imA, imB_compound, certainties_max, certainties_max_idcs, matches_NN, roma_model
+                )
+
+                proj_matrices_A = viewpoint_stack[source_idx].full_proj_transform
+                proj_matrices_B = viewpoint_stack[closest_indices_selected[source_idx, NN_idx]].full_proj_transform
+                triangulated_points, triangulated_points_errors_proj1, triangulated_points_errors_proj2 = triangulate_points(
+                    P1=torch.stack([proj_matrices_A] * M, axis=0),
+                    P2=torch.stack([proj_matrices_B] * M, axis=0),
+                    k1_x=kptsA_np[:M, 0], k1_y=kptsA_np[:M, 1],
+                    k2_x=kptsB_np[:M, 0], k2_y=kptsB_np[:M, 1])
+
+                reference_image_dict["triangulated_points"].append(triangulated_points)
+                reference_image_dict["triangulated_points_errors_proj1"].append(triangulated_points_errors_proj1)
+                reference_image_dict["triangulated_points_errors_proj2"].append(triangulated_points_errors_proj2)
+
+        with torch.no_grad():
+            NNs_triangulated_points_selected, NNs_triangulated_points_selected_proj_errors = select_best_keypoints(
+                NNs_triangulated_points=torch.stack(reference_image_dict["triangulated_points"], dim=0),
+                NNs_errors_proj1=np.stack(reference_image_dict["triangulated_points_errors_proj1"], axis=0),
+                NNs_errors_proj2=np.stack(reference_image_dict["triangulated_points_errors_proj2"], axis=0))
+
+        # 4. Save as gaussians
+        viewpoint_cam1 = viewpoint_stack[source_idx]
+        N = len(NNs_triangulated_points_selected)
+        with torch.no_grad():
+            new_xyz = NNs_triangulated_points_selected[:, :-1]
+            all_new_xyz.append(new_xyz.cpu())  # seeked_splats
+            all_new_colors.append(kptsA_color / 255.)
+
+    all_new_xyz = np.concatenate(all_new_xyz, axis=0)
+    all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
+
+    all_new_colors = np.concatenate(all_new_colors, axis=0)
+
+    pc = o3d.geometry.PointCloud()
+    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+    o3d.utility.Vector3dVector()
+    print("estimating normals")
+    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+
+    normals = np.asarray(pc.normals)
+
+    print("done estimating normals")
+
+    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
+
 def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=False, output_dict={}):
     """
     Extracts keypoints and corresponding colors from a source image (imA) and a single target image (imB).

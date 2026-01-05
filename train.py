@@ -24,6 +24,10 @@ from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
+from utils.render_utils import save_img_f32, save_img_u8
+from utils.mesh_utils import GaussianExtractor, post_process_mesh
+from mesh_snapshot import mesh_snapshot
+import open3d as o3d
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -41,11 +45,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
     else:
-        if args.fast_init == 1:
-            init_gaussians_with_corr_fast(dataset, gaussians, scene, device=torch.device('cuda'))
-        else :
-            init_gaussians_with_corr(dataset, gaussians, scene, device=torch.device('cuda'))
-        gaussians.training_setup(opt)
+        if args.old_init == 0:
+            if args.fast_init == 1:
+                init_gaussians_with_corr_fast(dataset, gaussians, scene, device=torch.device('cuda'))
+            else :
+                init_gaussians_with_corr(dataset, gaussians, scene, device=torch.device('cuda'))
+            gaussians.training_setup(opt)
 
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
@@ -67,6 +72,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     frame_idx = 0
     snapshot_interval = 50
     """
+    if dataset.render_snapshots == 1:
+        snapshot_dir = os.path.join(scene.model_path, "normal_snapshots/")
+        os.makedirs(snapshot_dir, exist_ok=True)
+    if dataset.mesh_snapshots == 1:
+        mesh_snapshot_dir = os.path.join(scene.model_path, "mesh_snapshots/")
+        os.makedirs(mesh_snapshot_dir, exist_ok=True)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -151,9 +162,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
                 
-                if iteration < opt.densify_until_iter and iteration % 10 == 0:
-                    opacities_new = torch.log(torch.exp(gaussians._opacity.data) * 0.99)
-                    gaussians._opacity.data = opacities_new
+                #if iteration < opt.densify_until_iter and iteration % 10 == 0:
+                #    opacities_new = torch.log(torch.exp(gaussians._opacity.data) * 0.99)
+                #    gaussians._opacity.data = opacities_new
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
             #"""
@@ -166,6 +177,31 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
+            if dataset.render_snapshots == 1 and (iteration-1) % (dataset.snapshot_frequency) == 0:
+                snapshot_cam = scene.getTrainCameras()[dataset.snapshot_camera_id]
+                snapshot_render = render(snapshot_cam, gaussians, pipe, background)
+                #snapshot_depth = snapshot_render['surf_depth'].cpu()
+                snapshot_depthnormal = snapshot_render['surf_normal'].cpu()
+                snapshot_normal = torch.nn.functional.normalize(snapshot_render['rend_normal'], dim=0)
+
+                save_img_u8(snapshot_depthnormal.permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(snapshot_dir, 'depth_normal_{0:05d}'.format(iteration) + ".png"))
+                save_img_u8(snapshot_normal.permute(1,2,0).cpu().numpy() * 0.5 + 0.5, os.path.join(snapshot_dir, 'normal_{0:05d}'.format(iteration) + ".png"))
+
+            if dataset.mesh_snapshots == 1 and (iteration-1) % (dataset.mesh_snapshot_frequency) == 0:
+                gaussExtractor = GaussianExtractor(gaussians, render, pipe, bg_color=bg_color)
+                save_sh_degreee = gaussians.active_sh_degree
+                gaussExtractor.gaussians.active_sh_degree = 0
+                gaussExtractor.reconstruction(scene.getTrainCameras())
+                depth_trunc = 3.0
+                voxel_size = 0.004
+                sdf_trunc = 0.016
+                mesh = gaussExtractor.extract_mesh_bounded(voxel_size=voxel_size, sdf_trunc=sdf_trunc, depth_trunc=depth_trunc)
+                mesh_post = post_process_mesh(mesh, cluster_to_keep=1)
+                mesh_snapshot(mesh_post, os.path.join(mesh_snapshot_dir, 'mesh_snapshot_{0:05d}'.format(iteration) + ".png"))
+                gaussians.active_sh_degree = save_sh_degreee
+                o3d.io.write_triangle_mesh(os.path.join(scene.model_path, 'mesh_{0:05d}'.format(iteration) + ".ply"), mesh_post)
+
             """
             if iteration % snapshot_interval == 0:
                 test_render = render(fixed_cam, gaussians, pipe, background)["render"]

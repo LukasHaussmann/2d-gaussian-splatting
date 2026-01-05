@@ -4,7 +4,10 @@ import numpy as np
 mesh_file = "output/dtu_7knormal3kdd/train/ours_3000/fuse_post.ply"
 out_image = "snapshot.png"
 
-def mesh_snapshot(mesh_file, out_image):
+def mesh_snapshot_from_file(mesh_file, out_image):
+    mesh = o3d.io.read_triangle_mesh(mesh_file)
+    mesh_snapshot(mesh, out_image)
+def mesh_snapshot(mesh, out_image):
     R = np.array([
         [0.195078, -0.83833 ,  0.509064],
         [0.000000, -0.641533, -0.501670],
@@ -17,8 +20,6 @@ def mesh_snapshot(mesh_file, out_image):
     up = R.T @ np.array([0,1,0])
     center = [-0.245,  0.857,  0.210]
 
-    # Load mesh
-    mesh = o3d.io.read_triangle_mesh(mesh_file)
     mesh.compute_vertex_normals()
     mesh.vertex_colors = o3d.utility.Vector3dVector(np.full((len(mesh.vertices), 3), 0.5))  # neutral grey (or remove completely)
 
@@ -97,4 +98,4 @@ def mesh_snapshot(mesh_file, out_image):
     print(f"Saved snapshot to {out_image}")
 
 if __name__ == "__main__":
-    mesh_snapshot(mesh_file, out_image)
+    mesh_snapshot_from_file(mesh_file, out_image)

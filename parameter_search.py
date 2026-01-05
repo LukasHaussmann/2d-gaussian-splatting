@@ -2,12 +2,12 @@ import os
 import yaml
 from copy import deepcopy
 from itertools import product
-from mesh_snapshot import mesh_snapshot
+from mesh_snapshot import mesh_snapshot, mesh_snapshot_from_file
 from plot_metrics import plot_metrics_from_runs
 import subprocess
 
 BASE_CONFIG = dict(
-    matches_per_ref = 25_000,
+    matches_per_ref = 15_000,
     nns_per_ref = 3,
     scaling_factor = 0.001,
     proj_err_tolerance = 0.01,
@@ -17,7 +17,7 @@ BASE_CONFIG = dict(
     estimate_normals = 1,
     roma_model="Indoor",
 
-    iterations=7_000,
+    iterations=1_000,
     position_lr_init=0.00016,
     position_lr_final=0.0000016,
     position_lr_delay_mult=0.01,
@@ -38,18 +38,20 @@ BASE_CONFIG = dict(
     opacity_reset_interval=30_000,
     densify_until_iter=15_000,
     densify_grad_threshold=0.0002,
-    depth_ratio=1.0
+    #depth_ratio=1.0
 )
 
 SWEEPS = [dict(
     #feature_lr=[0.0025, 0.005],
-    #lambda_normal=[0,0.01,0.025],
-    matches_per_ref = [15_000],
-    densify_until_iter=[1000, 3000],
+    #lambda_normal=[0.05],
+    #matches_per_ref = [20_000],
+    #densify_until_iter=[1000],
+    #dist_reg_from=[1000],
+    #normal_reg_from=[1000],
     #lambda_dist=[1000],
-    #densify_from_iter=[0]
+    #estimate_normals=[0,1],
+    old_init = [1],
 
-    #fast_init=[0,1],
     #gaussians_init =['edgs'],
     #opacity_cull=[0.05]
 
@@ -57,7 +59,7 @@ SWEEPS = [dict(
     #densify_grad_threshold=[1e-4, 2e-4],
 ),]
 
-EXPERIMENT_ROOT = "experiments"
+EXPERIMENT_ROOT = "experiments_presentation"
 
 def format_value(v):
     if isinstance(v, float):
@@ -72,7 +74,7 @@ def experiment_name(sweep_keys: list, sweep_values: tuple) -> str:
     return "_".join(parts)
 
 def main():
-    scenes = ['scan24']
+    scenes = ['scan105']
     for scene in scenes:
         for SWEEP in SWEEPS:
             keys = list(SWEEP.keys())
@@ -80,8 +82,8 @@ def main():
             experiment_root = os.path.join(EXPERIMENT_ROOT, '_'.join(keys) + '_' + scene)
             os.makedirs(experiment_root, exist_ok=True)
             dtu_source = "../DTU"
-            save_iters = [1, 500, 1000, 3000, 5000, 7000]
-            #save_iters = [1, 500, 1000, 3000, 5000]
+            #save_iters = [500, 1000]
+            save_iters = [1, 500, 1000]
 
 
             for combo in product(*values):
@@ -123,7 +125,7 @@ def main():
                     os.system("python render.py --iteration " + str(iter) + " -s " + source + " -m " + exp_dir + render_args)
                     mesh_file = exp_dir + "/train/ours_" + str(iter) + "/fuse_post.ply"
                     snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-                    mesh_snapshot(mesh_file, snapshot_file)
+                    mesh_snapshot_from_file(mesh_file, snapshot_file)
 
                     subprocess.run(f'echo -n "{iter}," >> {metrics_file}', shell=True, check=True)
                     cmd = (
