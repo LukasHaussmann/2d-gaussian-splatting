@@ -693,7 +693,12 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
 
 def init_gaussians_with_corr_old(args : ModelParams, gaussians, scene, device):
     print("init_gaussians_with_corr_old")
-    roma_model = roma_outdoor(device=device)
+    if args.roma_model == "Outdoor":
+        roma_model = roma_outdoor(device=device)
+    elif args.roma_model == "Indoor":
+        roma_model = roma_indoor(device=device)
+    else:
+        raise Exception("Unknown roma model parameter")
     roma_model.upsample_preds = False
     roma_model.symmetric = False
     M = args.matches_per_ref
