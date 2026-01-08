@@ -13,7 +13,7 @@ import os
 import random
 import json
 
-from scene.corr_init import init_gaussians_with_corr
+from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -83,8 +83,13 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            point_cloud = init_gaussians_with_corr(self.gaussians, self,device=torch.device('cuda') )
-            self.gaussians.create_from_pcd(point_cloud, self.cameras_extent)
+            """
+            if args.fast_init == 0:
+                point_cloud = init_gaussians_with_corr(args, self.gaussians, self,device=torch.device('cuda'))
+            else:
+                point_cloud = init_gaussians_with_corr(args, self.gaussians, self,device=torch.device('cuda'))
+            """
+            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, False)
 
 
     def save(self, iteration):

@@ -55,6 +55,17 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         self.render_items = ['RGB', 'Alpha', 'Normal', 'Depth', 'Edge', 'Curvature']
+
+        self.matches_per_ref = 15_000
+        self.nns_per_ref = 3
+        self.scaling_factor = 0.001
+        self.proj_err_tolerance = 0.01
+        self.normal_estimate_knn = 20
+        self.random_normals = False
+        self.roma_model = "Indoor"
+        self.fast_init = 0
+        self.gaussians_init = '2dgs'
+        self.estimate_normals = 1
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -85,12 +96,15 @@ class OptimizationParams(ParamGroup):
         self.lambda_dssim = 0.2
         self.lambda_dist = 0.0
         self.lambda_normal = 0.05
+        self.normal_reg_from = 0
+        self.dist_reg_from = 1000
         self.opacity_cull = 0.005
+        
 
         self.densification_interval = 100
         self.opacity_reset_interval = 30000
-        self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_from_iter = 0
+        self.densify_until_iter = 1_000
         self.densify_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
 

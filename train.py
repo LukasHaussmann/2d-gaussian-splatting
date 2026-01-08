@@ -24,6 +24,7 @@ from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
 import torchvision
+from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
 try:
     from torch.utils.tensorboard import SummaryWriter
     TENSORBOARD_FOUND = True
@@ -90,6 +91,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
+    else:
+        if args.fast_init == 1:
+            init_gaussians_with_corr_fast(dataset, gaussians, scene, device=torch.device('cuda'))
+        else :
+            init_gaussians_with_corr(dataset, gaussians, scene, device=torch.device('cuda'))
+        gaussians.training_setup(opt)
+
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -148,8 +156,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
         
         # regularization
-        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
-        lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
+        lambda_normal = opt.lambda_normal if iteration > opt.normal_reg_from else 0.0
+        lambda_dist = opt.lambda_dist if iteration > opt.dist_reg_from else 0.0
 
         rend_dist = render_pkg["rend_dist"]
         rend_normal  = render_pkg['rend_normal']
@@ -215,8 +223,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 if iteration < opt.densify_until_iter and iteration % 10 == 0:
                     opacities_new = torch.log(torch.exp(gaussians._opacity.data) * 0.99)
                     gaussians._opacity.data = opacities_new
-                #if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                #    gaussians.reset_opacity()
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.reset_opacity()
             #"""
 
             # Optimizer step
