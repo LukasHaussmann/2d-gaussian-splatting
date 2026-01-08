@@ -107,6 +107,11 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     print("\n[ITER 0] Rendering initialization state (Zero-Shot)...")
     test_cameras = scene.getTestCameras()
     render_checkpoint(scene.model_path, 0, test_cameras, gaussians, pipe, background)
+    
+    # [NEW CODE] Explicitly save Iteration 0 if requested
+    if 0 in saving_iterations:
+        print("\n[ITER 0] Saving Gaussians (Initialization)")
+        scene.save(0)
     # ------------------------------------------
 
     """ for convergence frame capture
