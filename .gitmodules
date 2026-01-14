@@ -7,3 +7,6 @@
 [submodule "submodules/RoMa"]
 	path = submodules/RoMa
 	url = https://github.com/Parskatt/RoMa.git
+[submodule "submodules/depth_anything_v2"]
+	path = submodules/depth_anything_v2
+	url = https://github.com/DepthAnything/Depth-Anything-V2.git
