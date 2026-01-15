@@ -12,6 +12,8 @@
 import os
 import torch
 import time
+import matplotlib.pyplot as plt
+import numpy as np
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -32,54 +34,54 @@ except ImportError:
     TENSORBOARD_FOUND = False
 
 # -- New function for automated rendering of images at certain checkpoints --
-def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
-    """
-    Automated evaluation: Renders specific views and saves RGB + Normals.
-    Calculates PSNR, SSIM, and LPIPS.
-    """
-    render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
-    os.makedirs(render_path, exist_ok=True)
+# def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
+#     """
+#     Automated evaluation: Renders specific views and saves RGB + Normals.
+#     Calculates PSNR, SSIM, and LPIPS.
+#     """
+#     render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
+#     os.makedirs(render_path, exist_ok=True)
     
-    # Initialize Metrics
-    psnr_accum = 0.0
-    ssim_accum = 0.0
+#     # Initialize Metrics
+#     psnr_accum = 0.0
+#     ssim_accum = 0.0
     
-    # Render first 5 views for speed
-    subset_views = views[:5] 
+#     # Render first 5 views for speed
+#     subset_views = views[:5] 
 
-    for idx, view in enumerate(subset_views):
-        # Render
-        render_pkg = render(view, gaussians, pipeline, background)
-        image = render_pkg["render"]
+#     for idx, view in enumerate(subset_views):
+#         # Render
+#         render_pkg = render(view, gaussians, pipeline, background)
+#         image = render_pkg["render"]
         
-        # --- ROBUST FIX: Force device and Clamp ---
-        image = torch.clamp(image, 0.0, 1.0).to("cuda")
-        gt = torch.clamp(view.original_image[0:3, :, :], 0.0, 1.0).to("cuda")
-        # ------------------------------------------
+#         # --- ROBUST FIX: Force device and Clamp ---
+#         image = torch.clamp(image, 0.0, 1.0).to("cuda")
+#         gt = torch.clamp(view.original_image[0:3, :, :], 0.0, 1.0).to("cuda")
+#         # ------------------------------------------
 
-        # Save Normal Maps (visualize as RGB)
-        if "rend_normal" in render_pkg:
-            # rend_normal is [-1, 1], convert to [0, 1] for saving
-            normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).to("cuda")
-            torchvision.utils.save_image(normal_vis, os.path.join(render_path, f"{view.image_name}_normal.png"))
+#         # Save Normal Maps (visualize as RGB)
+#         if "rend_normal" in render_pkg:
+#             # rend_normal is [-1, 1], convert to [0, 1] for saving
+#             normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).to("cuda")
+#             torchvision.utils.save_image(normal_vis, os.path.join(render_path, f"{view.image_name}_normal.png"))
 
-        # Save RGB
-        torchvision.utils.save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
+#         # Save RGB
+#         torchvision.utils.save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
         
-        # --- Metrics Calculation ---
-        psnr_accum += psnr(image, gt).mean().double()
-        ssim_accum += ssim(image, gt).mean().double()
+#         # --- Metrics Calculation ---
+#         psnr_accum += psnr(image, gt).mean().double()
+#         ssim_accum += ssim(image, gt).mean().double()
 
-    # Average metrics
-    avg_psnr = psnr_accum / len(subset_views)
-    avg_ssim = ssim_accum / len(subset_views)
+#     # Average metrics
+#     avg_psnr = psnr_accum / len(subset_views)
+#     avg_ssim = ssim_accum / len(subset_views)
 
-    # Log metrics
-    log_file = os.path.join(model_path, "progress_log.txt")
-    with open(log_file, "a") as f:
-        f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}\n")
+#     # Log metrics
+#     log_file = os.path.join(model_path, "progress_log.txt")
+#     with open(log_file, "a") as f:
+#         f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}\n")
     
-    print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}")
+#     print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}")
     
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
@@ -110,17 +112,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
 
-    # --- ZERO-SHOT EVALUATION (ITERATION 0) ---
-    # This renders the scene immediately after initialization, before any training
-    print("\n[ITER 0] Rendering initialization state (Zero-Shot)...")
-    test_cameras = scene.getTestCameras()
-    render_checkpoint(scene.model_path, 0, test_cameras, gaussians, pipe, background)
+    # # --- ZERO-SHOT EVALUATION (ITERATION 0) ---
+    # # This renders the scene immediately after initialization, before any training
+    # print("\n[ITER 0] Rendering initialization state (Zero-Shot)...")
+    # test_cameras = scene.getTestCameras()
+    # render_checkpoint(scene.model_path, 0, test_cameras, gaussians, pipe, background)
     
-    # [NEW CODE] Explicitly save Iteration 0 if requested
-    if 0 in saving_iterations:
-        print("\n[ITER 0] Saving Gaussians (Initialization)")
-        scene.save(0)
-    # ------------------------------------------
+    # # [NEW CODE] Explicitly save Iteration 0 if requested
+    # if 0 in saving_iterations:
+    #     print("\n[ITER 0] Saving Gaussians (Initialization)")
+    #     scene.save(0)
+    # # ------------------------------------------
 
     """ for convergence frame capture
     test_cameras = scene.getTestCameras()
@@ -171,6 +173,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         total_loss.backward()
 
+        # =================== GRADIENT VISUALIZATION CODE ===================
+        if iteration == 7000:
+            print(f"\n[ITER {iteration}] Exporting Gradient Heatmap...")
+            try:
+                grads = viewspace_point_tensor.grad
+                if grads is not None:
+                    grad_norms = torch.norm(grads, dim=-1)
+                    
+                    # Normalize for visualization
+                    max_grad = torch.quantile(grad_norms, 0.99)
+                    normalized_grads = torch.clamp(grad_norms / max_grad, 0, 1)
+                    
+                    # Apply Colormap
+                    grad_np = normalized_grads.detach().cpu().numpy()
+                    cmap = plt.get_cmap('jet')
+                    colors_rgba = cmap(grad_np) 
+                    colors_rgb = colors_rgba[:, :3] 
+
+                    # Construct PLY
+                    xyz = gaussians.get_xyz.detach().cpu().numpy()
+                    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
+                             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
+                    elements = np.empty(xyz.shape[0], dtype=dtype)
+                    
+                    elements['x'] = xyz[:, 0]
+                    elements['y'] = xyz[:, 1]
+                    elements['z'] = xyz[:, 2]
+                    elements['red']   = (colors_rgb[:, 0] * 255).astype(np.uint8)
+                    elements['green'] = (colors_rgb[:, 1] * 255).astype(np.uint8)
+                    elements['blue']  = (colors_rgb[:, 2] * 255).astype(np.uint8)
+                    
+                    # Save
+                    heatmap_path = os.path.join(scene.model_path, "point_cloud", f"iteration_{iteration}", "gradient_heatmap.ply")
+                    os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                    
+                    # Use 'plyfile' directly (assuming it is installed via pip)
+                    from plyfile import PlyData, PlyElement
+                    el = PlyElement.describe(elements, 'vertex')
+                    PlyData([el]).write(heatmap_path)
+                    print(f"Saved Gradient Heatmap to: {heatmap_path}")
+            except Exception as e:
+                print(f"Visualization failed: {e}")
+        # ===================================================================
         iter_end.record()
 
         with torch.no_grad():
@@ -198,12 +243,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
 
-            # -- New: running automated eval at custom interval --
-            if iteration % 1000 == 0: # Or define a custom interval
-                print(f"\n[ITER {iteration}] Running automated evaluation...")
-                test_cameras = scene.getTestCameras()
-                render_checkpoint(scene.model_path, iteration, test_cameras, gaussians, pipe, background)
-            # -- End Change --
+            # # -- New: running automated eval at custom interval --
+            # if iteration % 1000 == 0: # Or define a custom interval
+            #     print(f"\n[ITER {iteration}] Running automated evaluation...")
+            #     test_cameras = scene.getTestCameras()
+            #     render_checkpoint(scene.model_path, iteration, test_cameras, gaussians, pipe, background)
+            # # -- End Change --
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
