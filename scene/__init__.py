@@ -13,9 +13,9 @@ import os
 import random
 import json
 
-from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast, init_gaussians_with_corr_old
+from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
 from utils.system_utils import searchForMaxIteration
-from scene.dataset_readers import sceneLoadTypeCallbacks
+from scene.dataset_readers import sceneLoadTypeCallbacks, fetchPly
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
@@ -83,18 +83,12 @@ class Scene:
                                                            "iteration_" + str(self.loaded_iter),
                                                            "point_cloud.ply"))
         else:
-            if args.old_init == 1:
-                point_cloud = init_gaussians_with_corr_old(args, self.gaussians, self,device=torch.device('cuda'))
-                self.gaussians.create_from_pcd(point_cloud, self.cameras_extent, args.estimate_normals)
-
-                """
-                if args.fast_init == 0:
-                    point_cloud = init_gaussians_with_corr(args, self.gaussians, self,device=torch.device('cuda'))
-                else:
-                    point_cloud = init_gaussians_with_corr(args, self.gaussians, self,device=torch.device('cuda'))
-                """
+            if args.fast_init == 0:
+                point_cloud = init_gaussians_with_corr(args, self.gaussians, self, scene_info, device=torch.device('cuda'))
             else:
-                self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent, False)
+                point_cloud = init_gaussians_with_corr_fast(args, self.gaussians, self, scene_info, device=torch.device('cuda'))
+
+            self.gaussians.create_from_pcd(point_cloud, self.cameras_extent, args.estimate_normals)
 
 
     def save(self, iteration):

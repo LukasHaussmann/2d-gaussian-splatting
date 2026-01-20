@@ -171,13 +171,25 @@ class GaussianModel:
 
         dist2 = torch.clamp_min(distCUDA2(torch.from_numpy(np.asarray(pcd.points)).float().cuda()), 0.0000001)
         scales = torch.log(torch.sqrt(dist2))[...,None].repeat(1, 2)
+        dists = torch.sqrt(dist2)
+        # Calculate a density score (0 to 1) using exponential decay.
+        # Points with distance << mean will have score ~1.0 (dense)
+        # Points with distance >> mean will have score ~0.0 (sparse/noise)
+        # You can adjust 'sensitivity' (default 1.0): higher values make it stricter against noise.
+        sensitivity = 1.0
+        density_score = torch.exp(-sensitivity * dists / dists.mean())
+        # Apply this score to your base opacity (0.25)
+        # We clamp to a small epsilon (e.g., 0.005) to ensure valid input for the inverse sigmoid
+        target_opacity = torch.clamp(0.35 * density_score, min=0.005, max=0.99)
+        # Reshape to (N, 1) and apply inverse activation
+        opacities = self.inverse_opacity_activation(target_opacity[..., None])
         if use_normals:
             normals = torch.tensor(np.asarray(pcd.normals)).float().cuda()
             rots = self.rotation_vector_from_normals(normals)
         else:
             rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 
-        opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        #opacities = self.inverse_opacity_activation(0.25 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -432,8 +444,8 @@ class GaussianModel:
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        #self.densify_and_clone(grads, max_grad, extent)
-        #self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_clone(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:

@@ -1,3 +1,8 @@
+import cv2
+from pytorch3d.renderer import PointsRasterizationSettings, PointsRasterizer
+from pytorch3d.structures import Pointclouds
+from pytorch3d.utils import cameras_from_opencv_projection
+from pytorch3d.ops import estimate_pointcloud_normals
 from romatch import roma_outdoor, roma_indoor
 import torch
 import numpy as np
@@ -9,6 +14,8 @@ from scipy.spatial.distance import cdist
 from tqdm import tqdm
 import torch.nn.functional as F
 from romatch.utils import get_tuple_transform_ops
+
+from depth_anything_v2.dpt import DepthAnythingV2
 from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
@@ -503,7 +510,233 @@ def select_best_keypoints(
 
     return NNs_triangulated_points_selected, np.min(NNs_errors_proj, axis=0)
 
-def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
+def get_intrinsic_matrix(camera):
+    # Calculate focal lengths in pixels
+    fx = (camera.image_width / 2.0) / np.tan(camera.FoVx / 2.0)
+    fy = (camera.image_height / 2.0) / np.tan(camera.FoVy / 2.0)
+
+    # Principal point (usually center of image)
+    cx = camera.image_width / 2.0
+    cy = camera.image_height / 2.0
+
+    K = np.array([
+        [fx,  0, cx],
+        [0,  fy, cy],
+        [0,   0,  1]
+    ])
+    return K
+
+def screenspace_to_camera(u, v, z_c, camera):
+    device = z_c.device
+
+    K = torch.as_tensor(
+        get_intrinsic_matrix(camera),
+        device=device,
+        dtype=torch.float32
+    )
+
+    fx, fy = K[0, 0], K[1, 1]
+    cx, cy = K[0, 2], K[1, 2]
+
+    x_c = (u - cx) * z_c / fx
+    y_c = (v - cy) * z_c / fy
+
+    return torch.stack([x_c, y_c, z_c], dim=1)
+
+def camera_to_world(points_cam, camera):
+    device = points_cam.device
+
+    R = torch.as_tensor(camera.R, device=device, dtype=torch.float32)
+    t = torch.as_tensor(camera.T, device=device, dtype=torch.float32)
+
+    points_world = torch.matmul(points_cam - t, R.T)
+    return points_world
+
+def screenspace_to_world(u, v, z, camera):
+    points_cam = screenspace_to_camera(u, v, z, camera)
+    points_world = camera_to_world(points_cam, camera)
+    return points_world
+def world_to_screenspace(camera, points3d):
+    device = points3d.device
+    R = torch.as_tensor(camera.R, device=device, dtype=torch.float32)
+
+    t = torch.as_tensor(camera.T, device=device, dtype=torch.float32)
+    K = torch.as_tensor(get_intrinsic_matrix(camera), device=device, dtype=torch.float32)
+    points_cam = torch.matmul(points3d.float(),R) + t
+
+    x_c = points_cam[:, 0]
+    y_c = points_cam[:, 1]
+    z_c = points_cam[:, 2]
+
+    u = (K[0, 0] * x_c / z_c) + K[0, 2]
+    v = (K[1, 1] * y_c / z_c) + K[1, 2]
+    return u,v,z_c
+
+def compute_alpha_comp_depth(camera, points3d):
+    DEVICE = points3d.device
+    W = camera.image_width
+    H = camera.image_height
+    R_colmap = torch.from_numpy(camera.R.T).to(DEVICE)
+    T_colmap = torch.from_numpy(camera.T).to(DEVICE)
+    K = torch.from_numpy(get_intrinsic_matrix(camera)).to(DEVICE)
+
+    cameras = cameras_from_opencv_projection(
+        R=R_colmap.unsqueeze(0).float(),
+        tvec=T_colmap.unsqueeze(0).float(),
+        camera_matrix=K.unsqueeze(0).float(),
+        image_size=torch.tensor([[H, W]])
+    )
+    raster_settings = PointsRasterizationSettings(
+        image_size=(H,W),
+        radius=0.010,     # The "splat" size; increase this to fill holes
+        points_per_pixel=10, # Number of points to track per pixel (z-buffer)
+    )
+    point_cloud = Pointclouds(points=[points3d])
+    rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
+    fragments = rasterizer(point_cloud)
+    zbuf = fragments.zbuf          # (1, H, W, K)
+    dists = fragments.dists        # (1, H, W, K)
+
+    # Mask invalid points
+    valid = zbuf > 0
+
+    # Alpha computation (matches AlphaCompositor)
+    sigma = raster_settings.radius
+    alpha = torch.exp(-dists / (sigma ** 2))
+    alpha = alpha * valid
+
+    # Front-to-back transmittance
+    one_minus_alpha = 1.0 - alpha
+    T = torch.cumprod(
+        torch.cat([torch.ones_like(alpha[..., :1]), one_minus_alpha[..., :-1]], dim=-1),
+        dim=-1,
+    )
+
+    weights = alpha * T
+
+    # Alpha-composited depth
+    depth_alpha = (weights * zbuf).sum(dim=-1)
+
+    # Normalize by total weight (important!)
+    weight_sum = weights.sum(dim=-1)
+    depth_alpha = depth_alpha / (weight_sum + 1e-6)
+
+    # Mask empty pixels
+    depth_alpha[weight_sum < 1e-6] = torch.nan
+    #plt.figure(figsize=(18, 6))
+    #plt.imshow(1/depth_alpha[0,...].cpu().numpy(), cmap='RdYlBu')
+    #plt.axis('off')
+    #plt.savefig('composited_depth.png',dpi=300)
+    return depth_alpha
+
+def depth_least_squares_fit(points_inv_depth, pred_inv_depth, empty_mask):
+    pred_inv_depth_masked = pred_inv_depth[~empty_mask].unsqueeze(-1)
+    points_inv_depth_masked = points_inv_depth[~empty_mask].unsqueeze(-1)
+    X = torch.cat([pred_inv_depth_masked, torch.ones_like(pred_inv_depth_masked)], dim=1)
+    y = points_inv_depth_masked
+    XTX_inv = (X.T @ X).inverse()
+    XTY = X.T @ y
+    AB = XTX_inv @ XTY
+    scale, shift = AB[0][0], AB[1][0]
+    """
+    ransac = RANSACRegressor(min_samples=50)
+    ransac.fit(pred_inv_depth_masked.cpu().numpy(), points_inv_depth_masked.cpu().numpy())
+
+    scale = ransac.estimator_.coef_[0][0]
+    shift = ransac.estimator_.intercept_[0]
+    """
+
+    #print(f"Relationship found: PCL_Inv = {scale:.4f} * Pred + {shift:.4f}")
+    return scale,shift
+
+def align_depth_prediction(camera, points3d, rbg, model, vis_file=None):
+    DEVICE = points3d.device
+
+    composited_depth = compute_alpha_comp_depth(camera, points3d)
+    empty_mask = ~(composited_depth > 0)
+    points_inv_depth_map = 1/(composited_depth + 1e-6)
+
+    raw_img = cv2.imread(camera.image_path)
+    predicted_inv_depth_map_np = model.infer_image(raw_img) # HxW raw depth map in numpy
+    predicted_inv_depth_map = torch.from_numpy(predicted_inv_depth_map_np).to(DEVICE)
+
+    scale, shift = depth_least_squares_fit(points_inv_depth_map[0,...], predicted_inv_depth_map, empty_mask[0,...])
+
+    if vis_file is not None:
+        aligned_depth = 1/(scale * predicted_inv_depth_map + shift)
+        aligned_depth[empty_mask[0,...]] = torch.nan
+
+        concatenated_depth = torch.cat([composited_depth[~empty_mask], aligned_depth[~empty_mask[0,...]]], dim=0)
+        cat_np = concatenated_depth.cpu().numpy()
+        vmin = np.percentile(cat_np, 2, axis=0)
+        vmax = np.percentile(cat_np, 98, axis=0)
+
+        composited_depth_clamped = torch.clamp(composited_depth, vmin, vmax)
+        aligned_depth_clamped = torch.clamp(aligned_depth, vmin, vmax)
+
+        fig,axes = plt.subplots(1, 2,figsize=(18, 6))
+        axes[0].imshow(torch.cat([composited_depth_clamped[0,...], aligned_depth_clamped], dim=1).cpu().numpy(), cmap='RdYlBu')
+        axes[0].set_title('Composited point depth | aligned predicted depth')
+        axes[0].axis('off')
+        abs_error = axes[1].imshow((torch.abs(composited_depth_clamped[0,...] - aligned_depth_clamped)).cpu().numpy(), cmap='magma')
+        axes[1].set_title('Absolute error point depth vs aligned prediction' + f' median depth {torch.nanmedian(concatenated_depth):.2f}')
+        cbar = fig.colorbar(abs_error, ax=axes[1])#, fraction=0.046, pad=0.04)
+        axes[1].axis('off')
+        plt.savefig(vis_file,dpi=300)
+    return 1/(scale * predicted_inv_depth_map + shift), scale, shift
+
+def depth_filter_points(viewpoint_cam1, scene_info, points, model):
+    device = points.device
+    sfm_points = torch.from_numpy(scene_info.point_cloud.points).to(device)
+    sfm_rbg = torch.from_numpy(scene_info.point_cloud.points).to(device)
+    aligned_depth_map,scale,shift = align_depth_prediction(viewpoint_cam1, sfm_points, sfm_rbg,model)#, f'depth_visuals/sfm_align_{source_idx}.png')
+
+    W = viewpoint_cam1.image_width
+    H = viewpoint_cam1.image_height
+    R_colmap = torch.from_numpy(viewpoint_cam1.R.T).to(device)
+    T_colmap = torch.from_numpy(viewpoint_cam1.T).to(device)
+    K = torch.from_numpy(get_intrinsic_matrix(viewpoint_cam1)).to(device)
+
+    cameras = cameras_from_opencv_projection(
+        R=R_colmap.unsqueeze(0).float(),
+        tvec=T_colmap.unsqueeze(0).float(),
+        camera_matrix=K.unsqueeze(0).float(),
+        image_size=torch.tensor([[H, W]])
+    )
+    raster_settings = PointsRasterizationSettings(
+        image_size=(H,W),
+        radius=0.010,     # The "splat" size; increase this to fill holes
+        points_per_pixel=10, # Number of points to track per pixel (z-buffer)
+    )
+    point_cloud = Pointclouds(points=[points])
+    rasterizer = PointsRasterizer(cameras=cameras, raster_settings=raster_settings)
+    fragments = rasterizer(point_cloud)
+    #zbuf = fragments.zbuf          # (1, H, W, K)
+    depth_map = fragments.zbuf[0,..., 0]
+    empty_mask = fragments.idx[0,..., 0] == -1
+    depth_map[empty_mask] = torch.nan
+    aligned_corr_depth = aligned_depth_map.clone()
+    aligned_corr_depth[empty_mask] = torch.nan
+    #visualize_point_vs_aligned_depth(depth_map, aligned_corr_depth, out_file=f'depth_visuals/corr_depth_aligned_{source_idx}.png')
+
+    u,v,z = world_to_screenspace(viewpoint_cam1, points)
+
+    valid_mask = (
+            (z > 0) &           # In front of camera
+            (u >= 0) & (u < W) &    # Inside image width
+            (v >= 0) & (v < H)      # Inside image height
+    )
+    u_valid = u[valid_mask].long()
+    v_valid = v[valid_mask].long()
+    z_valid = z[valid_mask]
+    z_predicted = aligned_depth_map[v_valid, u_valid]
+    depth_error = torch.abs(z_predicted - z_valid) / z_valid
+    tolerance = 0.05
+    prune_mask = valid_mask.clone()
+    prune_mask[valid_mask] = depth_error <= tolerance
+    return prune_mask
+    #xyz_corrected = screenspace_to_world(u_valid, v_valid, z_predicted, viewpoint_cam1)
+def init_gaussians_with_corr(args : ModelParams, gaussians, scene, scene_info, device):
     print("init_gaussians_with_corr")
     if args.roma_model == "Outdoor":
         roma_model = roma_outdoor(device=device)
@@ -516,7 +749,6 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     M = args.matches_per_ref
     upper_thresh = roma_model.sample_thresh
     expansion_factor = 1
-    scaling_factor = args.scaling_factor
     keypoint_fit_error_tolerance = args.proj_err_tolerance
     visualizations = {}
     viewpoint_stack = scene.getTrainCameras().copy()
@@ -541,6 +773,19 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
     all_new_scaling = []
     all_new_rotation = []
     all_new_colors = []
+
+    model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+    }
+
+    encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
+
+    model = DepthAnythingV2(**model_configs[encoder])
+    model.load_state_dict(torch.load(f'submodules/depth_anything_v2/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
+    model = model.to(device).eval()
 
     # Run roma_model.match once to kinda initialize the model
     with torch.no_grad():
@@ -627,211 +872,36 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, device):
         N = len(NNs_triangulated_points_selected)
         with torch.no_grad():
             new_xyz = NNs_triangulated_points_selected[:, :-1]
-            all_new_xyz.append(new_xyz)  # seeked_splats
-            all_new_colors.append(kptsA_color / 255.)
-            all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
-            all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
-            # new version that sets points with large error invisible
-            # TODO: remove those points instead. However it doesn't affect the performance.
-            mask_bad_points = torch.tensor(
-                NNs_triangulated_points_selected_proj_errors > keypoint_fit_error_tolerance,
-                dtype=torch.float32).unsqueeze(1).to(device)
-            all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
+            prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+            new_xyz = new_xyz[prune_mask]
 
-            dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz,
-                                                    dim=1, ord=2)
-            #all_new_scaling.append(torch.log(((dist_points_to_cam1) / 1. * scaling_factor).unsqueeze(1).repeat(1, 3)))
-            all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 2)))
-            all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
-
-
-    all_new_xyz = torch.cat(all_new_xyz, dim=0)
-    all_new_colors = np.concatenate(all_new_colors, axis=0)
-
-    all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
-    new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
-    prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
-
-    if args.gaussians_init == '2dgs':
-        all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
-        if args.estimate_normals == 1:
-            pc = o3d.geometry.PointCloud()
-            pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-            o3d.utility.Vector3dVector()
-            print("estimating normals")
-            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-
-            normals = np.asarray(pc.normals)
-            pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
-            gaussians.create_from_pcd(pcd, scene.cameras_extent, use_normals=True)
-        else:
-            gaussians.create_from_pcd(BasicPointCloud(points=all_new_xyz,colors=all_new_colors,normals=None), scene.cameras_extent, use_normals=False)
-    else:
-
-        N_splats_at_init = len(gaussians._xyz)
-
-        gaussians.densification_postfix(all_new_xyz[prune_mask].to(device),
-                                        all_new_features_dc[prune_mask].to(device),
-                                        torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
-                                        torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
-                                        torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
-                                        torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
-                                        )
-
-        print("removing sfm gaussians")
-        with torch.no_grad():
-            N_splats_after_init = len(gaussians._xyz)
-            print("N_splats_after_init:", N_splats_after_init)
-            gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
-            mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
-                                 torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
-                                axis=0)
-        gaussians.prune_points(mask)
-
-    return viewpoint_stack, closest_indices_selected, visualizations
-
-def init_gaussians_with_corr_old(args : ModelParams, gaussians, scene, device):
-    print("init_gaussians_with_corr_old")
-    if args.roma_model == "Outdoor":
-        roma_model = roma_outdoor(device=device)
-    elif args.roma_model == "Indoor":
-        roma_model = roma_indoor(device=device)
-    else:
-        raise Exception("Unknown roma model parameter")
-    roma_model.upsample_preds = False
-    roma_model.symmetric = False
-    M = args.matches_per_ref
-    upper_thresh = roma_model.sample_thresh
-    expansion_factor = 1
-    keypoint_fit_error_tolerance = args.proj_err_tolerance
-    visualizations = {}
-    viewpoint_stack = scene.getTrainCameras().copy()
-    NUM_REFERENCE_FRAMES = min(180, len(viewpoint_stack))
-    NUM_NNS_PER_REFERENCE = args.nns_per_ref
-    # Select cameras using K-means
-    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
-
-    selected_indices = select_cameras_kmeans(cameras=viewpoint_cam_all.detach().cpu().numpy(), K=NUM_REFERENCE_FRAMES)
-    selected_indices = sorted(selected_indices)
-    # Find the k-closest vectors for each vector
-    viewpoint_cam_all = torch.stack([x.world_view_transform.flatten() for x in viewpoint_stack], axis=0)
-    closest_indices = k_closest_vectors(viewpoint_cam_all, NUM_NNS_PER_REFERENCE)
-    #print("Indices of k-closest vectors for each vector:\n", closest_indices)
-
-    closest_indices_selected = closest_indices[:, :].detach().cpu().numpy()
-
-    all_new_xyz = []
-    all_new_features_dc = []
-    all_new_features_rest = []
-    all_new_opacities = []
-    all_new_scaling = []
-    all_new_rotation = []
-    all_new_colors = []
-
-    # Run roma_model.match once to kinda initialize the model
-    with torch.no_grad():
-        viewpoint_cam1 = viewpoint_stack[0]
-        viewpoint_cam2 = viewpoint_stack[1]
-        imA = viewpoint_cam1.original_image.detach().cpu().numpy().transpose(1, 2, 0)
-        imB = viewpoint_cam2.original_image.detach().cpu().numpy().transpose(1, 2, 0)
-        imA = Image.fromarray(np.clip(imA * 255, 0, 255).astype(np.uint8))
-        imB = Image.fromarray(np.clip(imB * 255, 0, 255).astype(np.uint8))
-        warp, certainty_warp = roma_model.match(imA, imB, device=device)
-        print("Once run full roma_model.match warp.shape:", warp.shape)
-        print("Once run full roma_model.match certainty_warp.shape:", certainty_warp.shape)
-        del warp, certainty_warp
-        torch.cuda.empty_cache()
-
-    for source_idx in tqdm(sorted(selected_indices)):
-        # 1. Compute keypoints and warping for all the neighboring views
-        with torch.no_grad():
-            # Call the aggregation function to get imA and imB_compound
-            certainties_max, warps_max, certainties_max_idcs, imA, imB_compound, certainties_all, warps_all = aggregate_confidences_and_warps(
-                viewpoint_stack=viewpoint_stack,
-                closest_indices=closest_indices_selected,
-                roma_model=roma_model,
-                source_idx=source_idx,
-                verbose=False, output_dict=visualizations
-            )
-
-        # Triangulate keypoints
-        with torch.no_grad():
-            matches = warps_max
-            certainty = certainties_max
-            certainty = certainty.clone()
-            certainty[certainty > upper_thresh] = 1
-            matches, certainty = (
-                matches.reshape(-1, 4),
-                certainty.reshape(-1),
-            )
-
-            # Select based on certainty elements with high confidence. These are basically all of
-            # kptsA_np.
-            good_samples = torch.multinomial(certainty,
-                                             num_samples=min(expansion_factor * M, len(certainty)),
-                                             replacement=False)
-        certainties_max, warps_max, certainties_max_idcs, imA, imB_compound, certainties_all, warps_all
-        reference_image_dict = {
-            "ref_image": imA,
-            "NNs_images": imB_compound,
-            "certainties_all": certainties_all,
-            "warps_all": warps_all,
-            "triangulated_points": [],
-            "triangulated_points_errors_proj1": [],
-            "triangulated_points_errors_proj2": []
-
-        }
-        with torch.no_grad():
-            for NN_idx in tqdm(range(len(warps_all))):
-                matches_NN = warps_all[NN_idx].reshape(-1, 4)[good_samples]
-
-                # Extract keypoints and colors
-                kptsA_np, kptsB_np, kptsB_proj_matrices_idcs, kptsA_color, kptsB_color = extract_keypoints_and_colors(
-                    imA, imB_compound, certainties_max, certainties_max_idcs, matches_NN, roma_model
-                )
-
-                proj_matrices_A = viewpoint_stack[source_idx].full_proj_transform
-                proj_matrices_B = viewpoint_stack[closest_indices_selected[source_idx, NN_idx]].full_proj_transform
-                triangulated_points, triangulated_points_errors_proj1, triangulated_points_errors_proj2 = triangulate_points(
-                    P1=torch.stack([proj_matrices_A] * M, axis=0),
-                    P2=torch.stack([proj_matrices_B] * M, axis=0),
-                    k1_x=kptsA_np[:M, 0], k1_y=kptsA_np[:M, 1],
-                    k2_x=kptsB_np[:M, 0], k2_y=kptsB_np[:M, 1])
-
-                reference_image_dict["triangulated_points"].append(triangulated_points)
-                reference_image_dict["triangulated_points_errors_proj1"].append(triangulated_points_errors_proj1)
-                reference_image_dict["triangulated_points_errors_proj2"].append(triangulated_points_errors_proj2)
-
-        with torch.no_grad():
-            NNs_triangulated_points_selected, NNs_triangulated_points_selected_proj_errors = select_best_keypoints(
-                NNs_triangulated_points=torch.stack(reference_image_dict["triangulated_points"], dim=0),
-                NNs_errors_proj1=np.stack(reference_image_dict["triangulated_points_errors_proj1"], axis=0),
-                NNs_errors_proj2=np.stack(reference_image_dict["triangulated_points_errors_proj2"], axis=0))
-
-        # 4. Save as gaussians
-        viewpoint_cam1 = viewpoint_stack[source_idx]
-        N = len(NNs_triangulated_points_selected)
-        with torch.no_grad():
-            new_xyz = NNs_triangulated_points_selected[:, :-1]
             all_new_xyz.append(new_xyz.cpu())  # seeked_splats
-            all_new_colors.append(kptsA_color / 255.)
+            all_new_colors.append(kptsA_color[prune_mask.cpu().numpy()] / 255.)
 
     all_new_xyz = np.concatenate(all_new_xyz, axis=0)
     all_new_xyz = np.asarray(all_new_xyz, dtype=np.float64)
 
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
-    pc = o3d.geometry.PointCloud()
-    pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-    o3d.utility.Vector3dVector()
-    print("estimating normals")
-    pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-    pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+    if args.estimate_normals == 1:
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+        o3d.utility.Vector3dVector()
+        print("estimating normals")
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
 
-    normals = np.asarray(pc.normals)
+        #pts = torch.tensor(all_new_xyz).to("cuda").unsqueeze(0)
 
-    print("done estimating normals")
+        # Estimate normals
+        # returns [Batch, Points, 3]
+        #normals = estimate_pointcloud_normals(pts, neighborhood_size=args.normal_estimate_knn)
+
+        normals = np.asarray(pc.normals)
+
+        print("done estimating normals")
+    else:
+        normals = np.asarray(all_new_xyz)
 
     return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
 
@@ -894,7 +964,7 @@ def extract_keypoints_and_colors_single(imA, imB, matches, roma_model, verbose=F
 
     return kptsA_np_norm, kptsB_np_norm, kptsA_color, kptsB_color
 
-def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, verbose=False):
+def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, scene_info, device, verbose=False):
     timings = defaultdict(list)
 
     print("init_gaussians_with_corr_fast")
@@ -934,6 +1004,19 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
     all_new_scaling = []
     all_new_rotation = []
     all_new_colors = []
+
+    model_configs = {
+        'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
+        'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
+        'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
+        'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
+    }
+
+    encoder = 'vitb' # or 'vits', 'vitb', 'vitg'
+
+    model = DepthAnythingV2(**model_configs[encoder])
+    model.load_state_dict(torch.load(f'submodules/depth_anything_v2/checkpoints/depth_anything_v2_{encoder}.pth', map_location='cpu'))
+    model = model.to(device).eval()
 
     # Dummy first pass to initialize model
     with torch.no_grad():
@@ -1016,78 +1099,42 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
         viewpoint_cam1 = viewpoint_stack[source_idx]
         N = len(NNs_triangulated_points_selected)
         new_xyz = NNs_triangulated_points_selected[:, :-1]
-        all_new_xyz.append(new_xyz)
-        all_new_colors.append(kptsA_color / 255.)
-        all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
-        all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
+        prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+        all_new_xyz.append(new_xyz[prune_mask])
+        all_new_colors.append(kptsA_color[prune_mask.cpu().numpy()] / 255.)
+        #all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
+        #all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
 
         mask_bad_points = torch.tensor(
             NNs_triangulated_points_selected_proj_errors > keypoint_fit_error_tolerance,
             dtype=torch.float32).unsqueeze(1).to(device)
 
-        all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
+        #all_new_opacities.append(torch.stack([gaussians._opacity[-1].clone().detach()] * N, dim=0) * 0. - mask_bad_points * (1e1))
 
-        dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz, dim=1, ord=2)
-        all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 2)))
-        all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
+        #dist_points_to_cam1 = torch.linalg.norm(viewpoint_cam1.camera_center.clone().detach() - new_xyz, dim=1, ord=2)
+        #all_new_scaling.append(gaussians.scaling_inverse_activation((dist_points_to_cam1 * scaling_factor).unsqueeze(1).repeat(1, 2)))
+        #all_new_rotation.append(torch.stack([gaussians._rotation[-1].clone().detach()] * N, dim=0))
         timings['save_gaussians'].append(time.time() - start)
 
     # =================== Final Densification Postfix ===================
     start = time.time()
     all_new_xyz = torch.cat(all_new_xyz, dim=0)
     all_new_colors = np.concatenate(all_new_colors, axis=0)
-    all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
-    new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
-    prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
+    #all_new_features_dc = torch.cat(all_new_features_dc, dim=0)
+    #new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
+    #prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
 
-    if args.gaussians_init == '2dgs':
-        all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
-        if args.estimate_normals == 1:
-            pc = o3d.geometry.PointCloud()
-            pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-            o3d.utility.Vector3dVector()
-            print("estimating normals")
-            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+    all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
+    normals = None
+    if args.estimate_normals == 1:
+        pc = o3d.geometry.PointCloud()
+        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+        o3d.utility.Vector3dVector()
+        print("estimating normals")
+        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
 
-            normals = np.asarray(pc.normals)
-            pcd = BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
-            gaussians.create_from_pcd(pcd, scene.cameras_extent, use_normals=True)
-        else:
-            gaussians.create_from_pcd(BasicPointCloud(points=all_new_xyz,colors=all_new_colors,normals=None), scene.cameras_extent, use_normals=False)
-    else:
-        N_splats_at_init = len(gaussians._xyz)
-        gaussians.densification_postfix(
-            all_new_xyz[prune_mask].to(device),
-            all_new_features_dc[prune_mask].to(device),
-            torch.cat(all_new_features_rest, dim=0)[prune_mask].to(device),
-            torch.cat(all_new_opacities, dim=0)[prune_mask].to(device),
-            torch.cat(all_new_scaling, dim=0)[prune_mask].to(device),
-            torch.cat(all_new_rotation, dim=0)[prune_mask].to(device)
-            #new_tmp_radii[prune_mask].to(device)
-        )
-        print("removing sfm gaussians")
-        with torch.no_grad():
-            N_splats_after_init = len(gaussians._xyz)
-            print("N_splats_after_init:", N_splats_after_init)
-            gaussians.tmp_radii = torch.zeros(gaussians._xyz.shape[0]).to(device)
-            mask = torch.concat([torch.ones(N_splats_at_init, dtype=torch.bool),
-                                 torch.zeros(N_splats_after_init-N_splats_at_init, dtype=torch.bool)],
-                                axis=0)
-        gaussians.prune_points(mask)
-
-        if args.estimate_normals == 1:
-            pc = o3d.geometry.PointCloud()
-            pc.points = o3d.utility.Vector3dVector(all_new_xyz[prune_mask].cpu().numpy())
-            o3d.utility.Vector3dVector()
-            print("estimating normals")
-            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-            print("estimating normals done")
-
-            normals = torch.tensor(np.asarray(pc.normals)).float().cuda()
-            rots = gaussians.rotation_vector_from_normals(normals)
-            gaussians._rotation = torch.nn.Parameter(rots.requires_grad_(True))
+        normals = np.asarray(pc.normals)
 
     timings['final_densification_postfix'].append(time.time() - start)
 
@@ -1096,4 +1143,4 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, device, 
     for key, times in timings.items():
         print(f"{key:35s}: {sum(times) / len(times):.4f} sec (total {sum(times):.2f} sec)")
 
-    return viewpoint_stack, closest_indices_selected, visualizations
+    return BasicPointCloud(points=all_new_xyz, colors=all_new_colors, normals=normals)
