@@ -12,6 +12,8 @@
 import os
 import torch
 import time
+import matplotlib.pyplot as plt
+import numpy as np
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -23,6 +25,7 @@ from tqdm import tqdm
 from utils.image_utils import psnr, render_net_image
 from argparse import ArgumentParser, Namespace
 from arguments import ModelParams, PipelineParams, OptimizationParams
+import torchvision
 from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
 from utils.render_utils import save_img_f32, save_img_u8
 from utils.mesh_utils import GaussianExtractor, post_process_mesh
@@ -34,6 +37,56 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+# -- New function for automated rendering of images at certain checkpoints --
+# def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
+#     """
+#     Automated evaluation: Renders specific views and saves RGB + Normals.
+#     Calculates PSNR, SSIM, and LPIPS.
+#     """
+#     render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
+#     os.makedirs(render_path, exist_ok=True)
+    
+#     # Initialize Metrics
+#     psnr_accum = 0.0
+#     ssim_accum = 0.0
+    
+#     # Render first 5 views for speed
+#     subset_views = views[:5] 
+
+#     for idx, view in enumerate(subset_views):
+#         # Render
+#         render_pkg = render(view, gaussians, pipeline, background)
+#         image = render_pkg["render"]
+        
+#         # --- ROBUST FIX: Force device and Clamp ---
+#         image = torch.clamp(image, 0.0, 1.0).to("cuda")
+#         gt = torch.clamp(view.original_image[0:3, :, :], 0.0, 1.0).to("cuda")
+#         # ------------------------------------------
+
+#         # Save Normal Maps (visualize as RGB)
+#         if "rend_normal" in render_pkg:
+#             # rend_normal is [-1, 1], convert to [0, 1] for saving
+#             normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).to("cuda")
+#             torchvision.utils.save_image(normal_vis, os.path.join(render_path, f"{view.image_name}_normal.png"))
+
+#         # Save RGB
+#         torchvision.utils.save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
+        
+#         # --- Metrics Calculation ---
+#         psnr_accum += psnr(image, gt).mean().double()
+#         ssim_accum += ssim(image, gt).mean().double()
+
+#     # Average metrics
+#     avg_psnr = psnr_accum / len(subset_views)
+#     avg_ssim = ssim_accum / len(subset_views)
+
+#     # Log metrics
+#     log_file = os.path.join(model_path, "progress_log.txt")
+#     with open(log_file, "a") as f:
+#         f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}\n")
+    
+#     print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}")
+    
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     #start_time = time.time()
@@ -55,6 +108,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
+
+    # # --- ZERO-SHOT EVALUATION (ITERATION 0) ---
+    # # This renders the scene immediately after initialization, before any training
+    # print("\n[ITER 0] Rendering initialization state (Zero-Shot)...")
+    # test_cameras = scene.getTestCameras()
+    # render_checkpoint(scene.model_path, 0, test_cameras, gaussians, pipe, background)
+    
+    # # [NEW CODE] Explicitly save Iteration 0 if requested
+    # if 0 in saving_iterations:
+    #     print("\n[ITER 0] Saving Gaussians (Initialization)")
+    #     scene.save(0)
+    # # ------------------------------------------
 
     """ for convergence frame capture
     test_cameras = scene.getTestCameras()
@@ -111,6 +176,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         total_loss.backward()
 
+        # =================== GRADIENT VISUALIZATION CODE ===================
+        if iteration == 7000:
+            print(f"\n[ITER {iteration}] Exporting Gradient Heatmap...")
+            try:
+                grads = viewspace_point_tensor.grad
+                if grads is not None:
+                    grad_norms = torch.norm(grads, dim=-1)
+                    
+                    # Normalize for visualization
+                    max_grad = torch.quantile(grad_norms, 0.99)
+                    normalized_grads = torch.clamp(grad_norms / max_grad, 0, 1)
+                    
+                    # Apply Colormap
+                    grad_np = normalized_grads.detach().cpu().numpy()
+                    cmap = plt.get_cmap('jet')
+                    colors_rgba = cmap(grad_np) 
+                    colors_rgb = colors_rgba[:, :3] 
+
+                    # Construct PLY
+                    xyz = gaussians.get_xyz.detach().cpu().numpy()
+                    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
+                             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
+                    elements = np.empty(xyz.shape[0], dtype=dtype)
+                    
+                    elements['x'] = xyz[:, 0]
+                    elements['y'] = xyz[:, 1]
+                    elements['z'] = xyz[:, 2]
+                    elements['red']   = (colors_rgb[:, 0] * 255).astype(np.uint8)
+                    elements['green'] = (colors_rgb[:, 1] * 255).astype(np.uint8)
+                    elements['blue']  = (colors_rgb[:, 2] * 255).astype(np.uint8)
+                    
+                    # Save
+                    heatmap_path = os.path.join(scene.model_path, "point_cloud", f"iteration_{iteration}", "gradient_heatmap.ply")
+                    os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+                    
+                    # Use 'plyfile' directly (assuming it is installed via pip)
+                    from plyfile import PlyData, PlyElement
+                    el = PlyElement.describe(elements, 'vertex')
+                    PlyData([el]).write(heatmap_path)
+                    print(f"Saved Gradient Heatmap to: {heatmap_path}")
+            except Exception as e:
+                print(f"Visualization failed: {e}")
+        # ===================================================================
         iter_end.record()
 
         with torch.no_grad():
@@ -138,11 +246,17 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
 
+            # # -- New: running automated eval at custom interval --
+            # if iteration % 1000 == 0: # Or define a custom interval
+            #     print(f"\n[ITER {iteration}] Running automated evaluation...")
+            #     test_cameras = scene.getTestCameras()
+            #     render_checkpoint(scene.model_path, iteration, test_cameras, gaussians, pipe, background)
+            # # -- End Change --
+
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
 
             # Densification
             #"""
@@ -281,7 +395,12 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs):
+def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene: Scene, renderFunc, renderArgs):
+    import numpy as np
+    import torch
+    from utils.general_utils import colormap
+
+    # Scalars
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -291,43 +410,110 @@ def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_i
     # Report test and samples of training set
     if iteration in testing_iterations:
         torch.cuda.empty_cache()
-        validation_configs = ({'name': 'test', 'cameras' : scene.getTestCameras()}, 
-                              {'name': 'train', 'cameras' : [scene.getTrainCameras()[idx % len(scene.getTrainCameras())] for idx in range(5, 30, 5)]})
+        validation_configs = (
+            {'name': 'test', 'cameras': scene.getTestCameras()},
+            {
+                'name': 'train',
+                'cameras': [
+                    scene.getTrainCameras()[idx % len(scene.getTrainCameras())]
+                    for idx in range(5, 30, 5)
+                ],
+            },
+        )
 
         for config in validation_configs:
             if config['cameras'] and len(config['cameras']) > 0:
                 l1_test = 0.0
                 psnr_test = 0.0
+
                 for idx, viewpoint in enumerate(config['cameras']):
                     render_pkg = renderFunc(viewpoint, scene.gaussians, *renderArgs)
-                    image = torch.clamp(render_pkg["render"], 0.0, 1.0).to("cuda")
-                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
-                    if tb_writer and (idx < 5):
-                        from utils.general_utils import colormap
-                        depth = render_pkg["surf_depth"]
-                        norm = depth.max()
-                        depth = depth / norm
-                        depth = colormap(depth.cpu().numpy()[0], cmap='turbo')
-                        tb_writer.add_images(config['name'] + "_view_{}/depth".format(viewpoint.image_name), depth[None], global_step=iteration)
-                        tb_writer.add_images(config['name'] + "_view_{}/render".format(viewpoint.image_name), image[None], global_step=iteration)
 
+                    # Rendered RGB in [0,1], ground truth
+                    image = torch.clamp(render_pkg["render"], 0.0, 1.0)
+                    gt_image = torch.clamp(viewpoint.original_image.to("cuda"), 0.0, 1.0)
+
+                    if tb_writer and (idx < 5):
+                        # ---------- DEPTH IMAGE ----------
+                        depth = render_pkg["surf_depth"]  # torch tensor
+                        norm = depth.max()
+                        depth = depth / (norm + 1e-8)
+
+                        # depth: (1, H, W) -> numpy HWC via colormap -> torch NCHW
+                        depth_np = depth.detach().cpu().numpy()[0]   # (H, W)
+                        depth_rgb = colormap(depth_np, cmap='turbo') # (H, W, 3), uint8
+                        depth_rgb = np.array(depth_rgb, copy=True)
+                        depth_t = torch.from_numpy(depth_rgb).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+                        depth_t = depth_t.float() / 255.0
+
+                        # ---------- RENDERED IMAGE ----------
+                        img_np = image.detach().cpu().numpy()[0]     # (3, H, W) or (H, W, 3) depending on code
+                        if img_np.ndim == 3 and img_np.shape[0] == 3:
+                            # (C, H, W) -> (H, W, C)
+                            img_np = np.transpose(img_np, (1, 2, 0))
+                        img_rgb = colormap(img_np)                   # (H, W, 3)
+                        img_rgb = np.array(img_rgb, copy=True)
+                        image_t = torch.from_numpy(img_rgb).permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
+                        image_t = image_t.float() / 255.0
+
+                        tb_writer.add_images(
+                            config['name'] + "_view_{}/depth".format(viewpoint.image_name),
+                            depth_t,
+                            global_step=iteration,
+                        )
+                        tb_writer.add_images(
+                            config['name'] + "_view_{}/render".format(viewpoint.image_name),
+                            image_t,
+                            global_step=iteration,
+                        )
+
+                        # ---------- NORMALS / ALPHA / DIST ----------
                         try:
-                            rend_alpha = render_pkg['rend_alpha']
+                            rend_alpha = render_pkg['rend_alpha']          # expect (1,1,H,W) or similar
                             rend_normal = render_pkg["rend_normal"] * 0.5 + 0.5
                             surf_normal = render_pkg["surf_normal"] * 0.5 + 0.5
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name), rend_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name), surf_normal[None], global_step=iteration)
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name), rend_alpha[None], global_step=iteration)
 
-                            rend_dist = render_pkg["rend_dist"]
-                            rend_dist = colormap(rend_dist.cpu().numpy()[0])
-                            tb_writer.add_images(config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name), rend_dist[None], global_step=iteration)
-                        except:
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_normal".format(viewpoint.image_name),
+                                rend_normal[None],
+                                global_step=iteration,
+                            )
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/surf_normal".format(viewpoint.image_name),
+                                surf_normal[None],
+                                global_step=iteration,
+                            )
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_alpha".format(viewpoint.image_name),
+                                rend_alpha[None],
+                                global_step=iteration,
+                            )
+
+                            # rend_dist: tensor -> numpy -> colormap -> torch NCHW
+                            rend_dist = render_pkg["rend_dist"]            # torch tensor
+                            dist_np = rend_dist.detach().cpu().numpy()[0]  # (H, W)
+                            dist_rgb = colormap(dist_np)                   # (H, W, 3)
+                            dist_rgb = np.array(dist_rgb, copy=True)
+                            dist_t = torch.from_numpy(dist_rgb).permute(2, 0, 1).unsqueeze(0)
+                            dist_t = dist_t.float() / 255.0
+
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/rend_dist".format(viewpoint.image_name),
+                                dist_t,
+                                global_step=iteration,
+                            )
+                        except Exception:
                             pass
 
+                        # ---------- GROUND TRUTH ----------
                         if iteration == testing_iterations[0]:
-                            tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
+                            tb_writer.add_images(
+                                config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name),
+                                gt_image[None],
+                                global_step=iteration,
+                            )
 
+                    # accumulate metrics
                     l1_test += l1_loss(image, gt_image).mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 

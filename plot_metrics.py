@@ -1,81 +1,64 @@
-import os 
-import matplotlib.pyplot as plt
+import os
 import pandas as pd
+import matplotlib.pyplot as plt
+import glob
 
-def plot_metrics_from_runs(
-    base_dir,
-    output_file,
-    x_column="iterations",
-    y_columns=("accuracy", "completeness", "overall"),
-):
-    """
-    Plot evaluation metrics from CSV files stored in subdirectories.
-
-    Parameters
-    ----------
-    base_dir : str
-        Root directory containing experiment subdirectories.
-    output_file : str
-        Path to save the output plot.
-    x_column : str
-        Column name for x-axis values.
-    y_columns : tuple[str]
-        Metric columns to plot.
-    """
-
-    csv_paths = []
-    labels = []
-
-    # --- collect CSVs from all subdirectories ---
-    for name in sorted(os.listdir(base_dir)):
-        subdir = os.path.join(base_dir, name)
-        if not os.path.isdir(subdir):
-            continue
-
-        csv_files = [f for f in os.listdir(subdir) if f.endswith(".csv")]
-        if not csv_files:
-            continue
-
-        # assume exactly one CSV per subdirectory
-        csv_paths.append(os.path.join(subdir, csv_files[0]))
-        labels.append(name)
-
-    if not csv_paths:
-        print("No CSV files found in subdirectories.")
+def plot_metrics_from_runs(experiment_root, output_file):
+    csv_files = glob.glob(os.path.join(experiment_root, "**", "metrics.csv"), recursive=True)
+    
+    if not csv_files:
+        print("No metrics.csv files found to plot.")
         return
 
-    # --- create subplots ---
-    n_metrics = len(y_columns)
-    fig, axes = plt.subplots(
-        1, n_metrics, figsize=(6 * n_metrics, 5), sharex=True
-    )
-
-    if n_metrics == 1:
+    metrics_to_plot = ["accuracy", "completeness", "overall"]
+    
+    fig, axes = plt.subplots(1, len(metrics_to_plot), figsize=(18, 5))
+    if len(metrics_to_plot) == 1:
         axes = [axes]
 
-    # --- reference CSV for x-axis ---
-    reference_df = pd.read_csv(csv_paths[0])
-
-    # --- plotting ---
-    for i, metric in enumerate(y_columns):
+    for i, metric in enumerate(metrics_to_plot):
         ax = axes[i]
+        found_data = False
+        
+        for csv_file in csv_files:
+            try:
+                df = pd.read_csv(csv_file)
+                if metric not in df.columns:
+                    continue
+                
+                found_data = True
+                exp_dir = os.path.dirname(csv_file)
+                label = os.path.basename(exp_dir)
+                
+                # --- NEW: RUNTIME READING ---
+                runtime_file = os.path.join(exp_dir, "runtime.txt")
+                if os.path.exists(runtime_file):
+                    with open(runtime_file, "r") as f:
+                        # Append time to legend label (e.g. "experiment (45s)")
+                        content = f.read().strip()
+                        try:
+                            seconds = float(content)
+                            label += f" ({seconds:.0f}s)"
+                        except ValueError:
+                            pass
+                # ----------------------------
 
-        for csv_path, label in zip(csv_paths, labels):
-            df = pd.read_csv(csv_path)
-            ax.plot(df[metric].values, label=label)
+                if "iterations" in df.columns:
+                    ax.plot(df["iterations"], df[metric], marker='o', label=label)
+                    ax.set_xlabel("Iterations")
+                else:
+                    ax.plot(df[metric].values, marker='o', label=label)
+                    ax.set_xlabel("Checkpoints")
 
-        ax.set_xticks(range(len(reference_df)))
-        ax.set_xticklabels(
-            reference_df[x_column].astype(str), rotation=45
-        )
+            except Exception as e:
+                print(f"Error plotting {csv_file}: {e}")
 
-        ax.set_title(metric)
-        ax.set_xlabel("Iterations")
-        ax.set_ylabel("Value")
+        ax.set_title(metric.capitalize())
         ax.grid(True)
-        ax.set_ylim(bottom=0)
-        ax.legend()
+        if found_data:
+            ax.legend()
 
     plt.tight_layout()
-    plt.savefig(output_file, dpi=300)
-    plt.show()
+    plt.savefig(output_file)
+    print(f"Saved plot to {output_file}")
+    plt.close()

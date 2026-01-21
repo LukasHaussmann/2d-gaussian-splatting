@@ -1,11 +1,21 @@
 import os
 import yaml
+import time  # <--- NEW: Import time module
 from copy import deepcopy
 from itertools import product
-from mesh_snapshot import mesh_snapshot, mesh_snapshot_from_file
-from plot_metrics import plot_metrics_from_runs
+# from mesh_snapshot import mesh_snapshot, mesh_snapshot_from_file
+# from plot_metrics import plot_metrics_from_runs
+try:
+    from mesh_snapshot import mesh_snapshot
+    from plot_metrics import plot_metrics_from_runs
+except ImportError:
+    print("Warning: Visualization modules not found.")
+    def mesh_snapshot(*args): pass
+    def plot_metrics_from_runs(*args): pass
+
 import subprocess
 
+# ... [BASE_CONFIG and SWEEPS remain exactly the same] ...
 BASE_CONFIG = dict(
     matches_per_ref = 15_000,
     nns_per_ref = 3,
@@ -13,11 +23,11 @@ BASE_CONFIG = dict(
     proj_err_tolerance = 0.01,
     normal_estimate_knn = 20,
     gaussians_init = '2dgs',
-    fast_init = 0,
+    fast_init = 1,
     estimate_normals = 1,
     roma_model="Indoor",
 
-    iterations=1_000,
+    iterations=3_000,
     position_lr_init=0.00016,
     position_lr_final=0.0000016,
     position_lr_delay_mult=0.01,
@@ -83,7 +93,7 @@ def main():
             os.makedirs(experiment_root, exist_ok=True)
             dtu_source = "../DTU"
             #save_iters = [500, 1000]
-            save_iters = [1, 500, 1000]
+            save_iters = [1, 500, 1000, 3000]
 
 
             for combo in product(*values):
@@ -94,13 +104,8 @@ def main():
                 exp_dir = os.path.join(experiment_root, exp_name)
 
                 source = dtu_source + "/" + scene
-                train_args = ' '.join([" --" + key + " " + (str(value) if value is not None else "") for key, value in config.items()])
-                render_args = " --skip_train \
-                        --depth_ratio 1.0 \
-                        --num_cluster 1 \
-                        --voxel_size 0.004 \
-                        --sdf_trunc 0.016 \
-                        --depth_trunc 3.0"
+                train_args = ' '.join([" --" + key + " " + (str(value) if value is not None else "") for key, value in config.items()]) + " --eval"
+                render_args = " --skip_train --depth_ratio 1.0 --num_cluster 1 --voxel_size 0.004 --sdf_trunc 0.016 --depth_trunc 3.0"
 
                 if os.path.exists(exp_dir):
                     print(f"Skipping existing {exp_name}")
@@ -108,27 +113,41 @@ def main():
 
                 os.makedirs(exp_dir, exist_ok=True)
 
-                # Save config
                 with open(os.path.join(exp_dir, "config.yaml"), "w") as f:
                     yaml.safe_dump(config, f)
 
-                # Run experiment
-                print("python train.py -s " + source + " -m " + exp_dir + train_args + " --save_iterations " + ' '.join([str(it) for it in save_iters]))
-                os.system("python train.py -s " + source + " -m " + exp_dir + train_args + " --save_iterations " + ' '.join([str(it) for it in save_iters]))
+                # 1. TRAIN
+                train_cmd = "python train.py -s " + source + " -m " + exp_dir + train_args + " --save_iterations " + ' '.join([str(it) for it in save_iters])
+                print(f"Running: {train_cmd}")
+                
+                # --- NEW: TIMING LOGIC ---
+                start_time = time.time()
+                os.system(train_cmd)
+                total_runtime = time.time() - start_time
+                
+                with open(os.path.join(exp_dir, "runtime.txt"), "w") as f:
+                    f.write(f"{total_runtime:.2f}")
+                # -------------------------
 
                 metrics_file = exp_dir+'/metrics.csv'
                 metrics_header = "iterations,accuracy,completeness,overall"
                 subprocess.run(f'echo "{metrics_header}" > {metrics_file}', shell=True, check=True)
 
                 for iter in save_iters:
-                    print("python render.py --iteration " + str(iter) + " -s " + source + " -m " + exp_dir + render_args)
-                    os.system("python render.py --iteration " + str(iter) + " -s " + source + " -m " + exp_dir + render_args)
+                    render_cmd = "python render.py --iteration " + str(iter) + " -s " + source + " -m " + exp_dir + render_args
+                    print(f"Rendering: {render_cmd}")
+                    os.system(render_cmd)
+                    
                     mesh_file = exp_dir + "/train/ours_" + str(iter) + "/fuse_post.ply"
                     snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-                    mesh_snapshot_from_file(mesh_file, snapshot_file)
+                    try:
+                        mesh_snapshot(mesh_file, snapshot_file)
+                    except Exception:
+                        pass
 
                     subprocess.run(f'echo -n "{iter}," >> {metrics_file}', shell=True, check=True)
-                    cmd = (
+                    
+                    eval_cmd = (
                         f'python scripts/eval_dtu/evaluate_single_scene.py '
                         f'--input_mesh {exp_dir}/train/ours_{iter}/fuse_post.ply '
                         f'--scan_id {scene.replace("scan","",1)} '
@@ -136,10 +155,16 @@ def main():
                         f'--DTU ../DTU/ '
                         f'| sed "s/ /,/g" | grep ^[^cull] >> {metrics_file}'
                     )
-                    subprocess.run(cmd, shell=True, check=True)
+                    try:
+                        subprocess.run(eval_cmd, shell=True, check=True)
+                    except subprocess.CalledProcessError:
+                        print(f"Eval failed for iter {iter}")
+                        subprocess.run(f'echo "0,0,0" >> {metrics_file}', shell=True, check=True)
 
-        plot_metrics_from_runs(experiment_root, os.path.join(experiment_root, 'metrics.png'))
+        try:
+            plot_metrics_from_runs(experiment_root, os.path.join(experiment_root, 'metrics.png'))
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     main()
-
