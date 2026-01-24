@@ -873,9 +873,11 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, scene_info, d
         N = len(NNs_triangulated_points_selected)
         with torch.no_grad():
             new_xyz = NNs_triangulated_points_selected[:, :-1]
-            prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+            if args.initial_depth_pruning == 1:
+                prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+            else:
+                prune_mask = torch.ones(N, dtype=bool, device=device)
             new_xyz = new_xyz[prune_mask]
-
             all_new_xyz.append(new_xyz.cpu())  # seeked_splats
             all_new_colors.append(kptsA_color[prune_mask.cpu().numpy()] / 255.)
 
