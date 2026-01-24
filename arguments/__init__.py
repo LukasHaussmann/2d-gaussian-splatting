@@ -65,6 +65,7 @@ class ModelParams(ParamGroup):
         self.roma_model = "Indoor"
         self.fast_init = 1
         self.estimate_normals = 1
+        self.initial_depth_pruning = 1
 
         self.render_snapshots = 0
         self.snapshot_frequency = 10

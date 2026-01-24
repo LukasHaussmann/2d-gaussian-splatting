@@ -11,10 +11,10 @@ CONFIG = dict(
     normal_estimate_knn = 20,
     fast_init = 1,
     estimate_normals = 1,
-    per_view_normals = 0,
+    #per_view_normals = 0,
     roma_model="Indoor",
 
-    iterations=1_000,
+    iterations=5_000,
     position_lr_init=0.000016,
     position_lr_final=0.0000016,
     position_lr_delay_mult=0.01,
@@ -42,11 +42,11 @@ if __name__ == "__main__":
     exp_root = EXPERIMENT_ROOT
     os.makedirs(exp_root, exist_ok=True)
 
-    time_limit = 120
+    time_limit = 300
     dtu_source = "../DTU"
     repo_dir_2dgs = '~/2d-gaussian-splatting'
     metrics_header = "scan,accuracy,completeness,overall" + f" ({time_limit}s)"
-    scenes = ['scan105']
+    scenes = ['scan106', 'scan24']
     keys = list(CONFIG.keys())
     values = list(CONFIG.values())
     # Save config
@@ -62,6 +62,8 @@ if __name__ == "__main__":
                         --depth_trunc 3.0"
     metrics_file_ours = exp_root + '/metrics_ours.csv'
     metrics_file_2dgs = exp_root + '/metrics_2dgs.csv'
+    subprocess.run(f'echo "{metrics_header}" > {metrics_file_ours}', shell=True, check=True)
+    subprocess.run(f'echo "{metrics_header}" > {metrics_file_2dgs}', shell=True, check=True)
     for scene in scenes:
         exp_dir = os.path.join(exp_root, scene)
 
@@ -69,7 +71,6 @@ if __name__ == "__main__":
         train_command = "python train.py -s " + source + " -m " + exp_dir + train_args
         print(train_command)
         os.system(train_command)
-        subprocess.run(f'echo "{metrics_header}" > {metrics_file_ours}', shell=True, check=True)
 
         render_command = "python render.py -s " + source + " -m " + exp_dir + render_args
         print(render_command)
@@ -97,7 +98,6 @@ if __name__ == "__main__":
         train_cmd_2dgs = f"python {repo_dir_2dgs}/train.py -s " + source + " -m " + exp_dir_2dgs + common_args + " --time_limit " + str(time_limit)
         print(train_cmd_2dgs)
         os.system(train_cmd_2dgs)
-        subprocess.run(f'echo "{metrics_header}" > {metrics_file_2dgs}', shell=True, check=True)
 
         render_command = "python render.py -s " + source + " -m " + exp_dir_2dgs + render_args
         print(render_command)

@@ -3,6 +3,7 @@ from pytorch3d.renderer import PointsRasterizationSettings, PointsRasterizer
 from pytorch3d.structures import Pointclouds
 from pytorch3d.utils import cameras_from_opencv_projection
 from pytorch3d.ops import estimate_pointcloud_normals
+from pytorch3d.ops import knn_points
 from romatch import roma_outdoor, roma_indoor
 import torch
 import numpy as np
@@ -730,7 +731,7 @@ def depth_filter_points(viewpoint_cam1, scene_info, points, model):
     v_valid = v[valid_mask].long()
     z_valid = z[valid_mask]
     z_predicted = aligned_depth_map[v_valid, u_valid]
-    depth_error = torch.abs(z_predicted - z_valid) / z_valid
+    depth_error = (z_predicted - z_valid) / z_predicted
     tolerance = 0.05
     prune_mask = valid_mask.clone()
     prune_mask[valid_mask] = depth_error <= tolerance
@@ -1004,6 +1005,7 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, scene_in
     all_new_scaling = []
     all_new_rotation = []
     all_new_colors = []
+    all_new_normals = []
 
     model_configs = {
         'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
@@ -1099,9 +1101,23 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, scene_in
         viewpoint_cam1 = viewpoint_stack[source_idx]
         N = len(NNs_triangulated_points_selected)
         new_xyz = NNs_triangulated_points_selected[:, :-1]
-        prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+        if args.initial_depth_pruning == 1:
+            prune_mask = depth_filter_points(viewpoint_cam1, scene_info, new_xyz, model)
+        else:
+            prune_mask = torch.ones(N, dtype=bool, device=device)
         all_new_xyz.append(new_xyz[prune_mask])
         all_new_colors.append(kptsA_color[prune_mask.cpu().numpy()] / 255.)
+
+        """
+        if args.estimate_normals == 1 and args.per_view_normals == 1:
+            pc = o3d.geometry.PointCloud()
+            pc.points = o3d.utility.Vector3dVector(new_xyz[prune_mask].cpu().numpy())
+            o3d.utility.Vector3dVector()
+            pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+            pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+            all_new_normals.append(np.asarray(pc.normals))
+        """
+
         #all_new_features_dc.append(RGB2SH(torch.tensor(kptsA_color.astype(np.float32) / 255.)).unsqueeze(1))
         #all_new_features_rest.append(torch.stack([gaussians._features_rest[-1].clone().detach() * 0.] * N, dim=0))
 
@@ -1127,14 +1143,26 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, scene_in
     all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
     normals = None
     if args.estimate_normals == 1:
+        #if args.per_view_normals == 0:
+        print("estimating normals")
         pc = o3d.geometry.PointCloud()
         pc.points = o3d.utility.Vector3dVector(all_new_xyz)
         o3d.utility.Vector3dVector()
-        print("estimating normals")
         pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
         pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-
         normals = np.asarray(pc.normals)
+
+        #pts = torch.tensor(all_new_xyz).to("cuda")
+
+        # Estimate normals
+        # returns [Batch, Points, 3]
+        #normals = estimate_normals_custom(pts, args.normal_estimate_knn)
+        #normals = estimate_pointcloud_normals(pts, disambiguate_directions=False, neighborhood_size=args.normal_estimate_knn)[0].cpu().numpy()
+        print("done estimating normals")
+
+        #else:
+        #    all_new_normals = np.concatenate(all_new_normals, axis=0)
+        #    normals = all_new_normals
 
     timings['final_densification_postfix'].append(time.time() - start)
 
