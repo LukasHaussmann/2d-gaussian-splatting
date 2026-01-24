@@ -24,7 +24,7 @@ def mesh_snapshot(mesh, out_image):
     mesh.vertex_colors = o3d.utility.Vector3dVector(np.full((len(mesh.vertices), 3), 0.5))  # neutral grey (or remove completely)
 
     # Create offscreen renderer
-    width, height = 1920, 1080
+    width, height = 1080, 1080
     renderer = o3d.visualization.rendering.OffscreenRenderer(width, height)
 
     # Material settings

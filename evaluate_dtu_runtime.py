@@ -2,6 +2,7 @@ import os
 import yaml
 import subprocess
 
+from mesh_snapshot import mesh_snapshot_from_file
 
 CONFIG = dict(
     matches_per_ref = 15_000,
@@ -77,10 +78,10 @@ if __name__ == "__main__":
         os.system(render_command)
 
         train_dir = os.path.join(exp_dir, "train")
-        mesh_dir = os.listdir(train_dir)[0]
-        mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
-        #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-        #mesh_snapshot_from_file(mesh_file, snapshot_file)
+        mesh_dir = os.path.join(train_dir, os.listdir(train_dir)[0])
+        mesh_file = mesh_dir + "/fuse_post.ply"
+        snapshot_file = os.path.join(mesh_dir, "snapshot.png")
+        mesh_snapshot_from_file(mesh_file, snapshot_file)
 
         subprocess.run(f'echo -n "{scene}," >> {metrics_file_ours}', shell=True, check=True)
         cmd = (
@@ -104,10 +105,10 @@ if __name__ == "__main__":
         os.system(render_command)
 
         train_dir = os.path.join(exp_dir_2dgs, "train")
-        mesh_dir = os.listdir(train_dir)[0]
-        mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
-        #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-        #mesh_snapshot_from_file(mesh_file, snapshot_file)
+        mesh_dir = os.path.join(train_dir, os.listdir(train_dir)[0])
+        mesh_file = mesh_dir + "/fuse_post.ply"
+        snapshot_file = os.path.join(mesh_dir, "snapshot.png")
+        mesh_snapshot_from_file(mesh_file, snapshot_file)
 
         subprocess.run(f'echo -n "{scene}," >> {metrics_file_2dgs}', shell=True, check=True)
         cmd = (
