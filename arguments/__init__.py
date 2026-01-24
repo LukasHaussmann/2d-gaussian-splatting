@@ -63,7 +63,7 @@ class ModelParams(ParamGroup):
         self.normal_estimate_knn = 20
         self.random_normals = False
         self.roma_model = "Indoor"
-        self.fast_init = 0
+        self.fast_init = 1
         self.estimate_normals = 1
 
         self.render_snapshots = 0
@@ -90,6 +90,7 @@ class PipelineParams(ParamGroup):
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
         self.iterations = 30_000
+        self.time_limit = -1
         self.position_lr_init = 0.000016
         self.position_lr_final = 0.0000016
         self.position_lr_delay_mult = 0.01
@@ -110,7 +111,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 30000
         self.densify_from_iter = 0
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 0
         self.densify_grad_threshold = 0.0002
         super().__init__(parser, "Optimization Parameters")
 
