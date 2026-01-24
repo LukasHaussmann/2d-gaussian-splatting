@@ -29,6 +29,7 @@ import torchvision
 from scene.corr_init import init_gaussians_with_corr, init_gaussians_with_corr_fast
 from utils.render_utils import save_img_f32, save_img_u8
 from utils.mesh_utils import GaussianExtractor, post_process_mesh
+from utils.timer import Timer
 from mesh_snapshot import mesh_snapshot
 import open3d as o3d
 try:
@@ -90,6 +91,8 @@ except ImportError:
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     #start_time = time.time()
+    timer = Timer()
+    timer.start()
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
@@ -128,14 +131,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     os.makedirs(progress_dir, exist_ok=True)
     frame_idx = 0
     snapshot_interval = 50
-    """
     if dataset.render_snapshots == 1:
         snapshot_dir = os.path.join(scene.model_path, "normal_snapshots/")
         os.makedirs(snapshot_dir, exist_ok=True)
     if dataset.mesh_snapshots == 1:
         mesh_snapshot_dir = os.path.join(scene.model_path, "mesh_snapshots/")
         os.makedirs(mesh_snapshot_dir, exist_ok=True)
+    """
 
+    print('Start optimization: ', timer.get_elapsed_time())
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
     for iteration in range(first_iter, opt.iterations + 1):        
@@ -255,11 +259,18 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background))
             if (iteration in saving_iterations):
+                timer.pause()
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print("Elapsed time: ", timer.get_elapsed_time())
                 scene.save(iteration)
+                timer.start()
+            if (opt.time_limit > 0 and timer.get_elapsed_time() >= opt.time_limit):
+                print("\n[ITER {}] Saving Gaussians".format(iteration))
+                print("Elapsed time: ", timer.get_elapsed_time())
+                scene.save(iteration)
+                return
 
             # Densification
-            #"""
             if iteration < opt.densify_until_iter:
                 gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
                 gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
@@ -273,7 +284,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 #    gaussians._opacity.data = opacities_new
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
-            #"""
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -281,9 +291,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.optimizer.zero_grad(set_to_none = True)
 
             if (iteration in checkpoint_iterations):
+                timer.pause()
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+                timer.start()
 
+            """
             if dataset.render_snapshots == 1 and (iteration-1) % (dataset.snapshot_frequency) == 0:
                 snapshot_cam = scene.getTrainCameras()[dataset.snapshot_camera_id]
                 snapshot_render = render(snapshot_cam, gaussians, pipe, background)
@@ -308,7 +321,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 gaussians.active_sh_degree = save_sh_degreee
                 o3d.io.write_triangle_mesh(os.path.join(scene.model_path, 'mesh_{0:05d}'.format(iteration) + ".ply"), mesh_post)
 
-            """
             if iteration % snapshot_interval == 0:
                 test_render = render(fixed_cam, gaussians, pipe, background)["render"]
                 save_path = os.path.join(progress_dir, f"{frame_idx:05d}.png")
@@ -347,7 +359,8 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 imageio.imwrite(save_path, img_cv)
                 frame_idx += 1
             """
-        
+
+        """
         with torch.no_grad():        
             if network_gui.conn == None:
                 network_gui.try_connect(dataset.render_items)
@@ -371,6 +384,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 except Exception as e:
                     # raise e
                     network_gui.conn = None
+        """
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
