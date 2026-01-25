@@ -3,6 +3,14 @@ import yaml
 import subprocess
 from copy import deepcopy
 
+try:
+    from mesh_snapshot import mesh_snapshot_from_file
+    from plot_metrics import plot_metrics_from_runs
+except ImportError:
+    print("Warning: Visualization modules not found.")
+    def mesh_snapshot(*args): pass
+    def plot_metrics_from_runs(*args): pass
+
 
 CONFIG = dict(
     matches_per_ref = 15_000,
@@ -70,11 +78,11 @@ if __name__ == "__main__":
     exp_root = EXPERIMENT_ROOT
     os.makedirs(exp_root, exist_ok=True)
 
-    time_limit = 300
+    time_limit = 3000
     dtu_source = "../DTU"
     #repo_dir_2dgs = '~/2d-gaussian-splatting'  # for comparison with 2DGS baseline
     metrics_header = "scan,mode,accuracy,completeness,overall" + f" ({time_limit}s)" # added mode to header
-    scenes = ['scan106']#, 'scan24']
+    scenes = ['scan24']
 
     # --- moved into the loop ---
     # keys = list(CONFIG.keys())
@@ -89,84 +97,96 @@ if __name__ == "__main__":
                         --voxel_size 0.004 \
                         --sdf_trunc 0.016 \
                         --depth_trunc 3.0"
-    metrics_file_ours = exp_root + '/metrics_ours.csv'
+    #metrics_file_ours = exp_root + '/metrics_ours.csv'
     #metrics_file_2dgs = exp_root + '/metrics_2dgs.csv' # 2DGS Baseline
-    subprocess.run(f'echo "{metrics_header}" > {metrics_file_ours}', shell=True, check=True)
+    #subprocess.run(f'echo "{metrics_header}" > {metrics_file_ours}', shell=True, check=True)
     #subprocess.run(f'echo "{metrics_header}" > {metrics_file_2dgs}', shell=True, check=True) # 2DGS Baseline
 
     # --- Outer Loop: DTU Scenes ---
     for scene in scenes:
-        # --- Inner Loop: Ablation Modes ---
-        for mode_name, mode_settings in ABLATION_MODES.items():
-            print(f"--- Running {scene} | {mode_name} ---")
+      # Define file path inside the scene folder
+      scene_dir = os.path.join(exp_root, scene)
+      os.makedirs(scene_dir, exist_ok=True)
+      metrics_file_ours = os.path.join(scene_dir, 'metrics.csv')
+      # Create Header (Only if file doesn't exist yet)
+      if not os.path.exists(metrics_file_ours):
+        subprocess.run(f'echo "{metrics_header}" > {metrics_file_ours}', shell=True, check=True)
+      # --- Inner Loop: Ablation Modes ---
+      for mode_name, mode_settings in ABLATION_MODES.items():
+          print(f"--- Running {scene} | {mode_name} ---")
 
-            # 1. Update Config for this specific run
-            current_config = deepcopy(CONFIG)
-            current_config.update(mode_settings)
+          # 1. Update Config for this specific run
+          current_config = deepcopy(CONFIG)
+          current_config.update(mode_settings)
 
-            # 2. Folder Structure: scene/mode (Hierarchical)
-            exp_dir = os.path.join(exp_root, scene, mode_name)
-            os.makedirs(exp_dir, exist_ok=True) # Make sure the folder exists!
-            # Save specific config
-            with open(os.path.join(exp_dir, "config.yaml"), "w") as f:
-                yaml.safe_dump(current_config, f)
+          # 2. Folder Structure: scene/mode (Hierarchical)
+          exp_dir = os.path.join(exp_root, scene, mode_name)
+          os.makedirs(exp_dir, exist_ok=True) # Make sure the folder exists!
+          # Save specific config
+          with open(os.path.join(exp_dir, "config.yaml"), "w") as f:
+              yaml.safe_dump(current_config, f)
 
-            # 3. Construct Args INSIDE the loop so they update, using current_config
-            train_args = ' '.join([" --" + key + " " + (str(value) if value is not None else "") for key, value in current_config.items()]) + ' --time_limit ' + str(time_limit)
-            # add eval and save iterations to train_args
-            train_args += " --eval"#--save_iterations " + str(current_config['iterations']) # removing save_iterations to avoid conflict with time limit
+          # 3. Construct Args INSIDE the loop so they update, using current_config
+          train_args = ' '.join([" --" + key + " " + (str(value) if value is not None else "") for key, value in current_config.items()]) + ' --time_limit ' + str(time_limit)
+          # add eval and save iterations to train_args
+          train_args += " --eval"#--save_iterations " + str(current_config['iterations']) # removing save_iterations to avoid conflict with time limit
 
-            source = dtu_source + "/" + scene
+          source = dtu_source + "/" + scene
 
-            train_command = "python train.py -s " + source + " -m " + exp_dir + train_args
-            print(train_command)
-            os.system(train_command)
+          train_command = "python train.py -s " + source + " -m " + exp_dir + train_args
+          print(train_command)
+          os.system(train_command)
 
-            render_command = "python render.py -s " + source + " -m " + exp_dir + render_args
-            print(render_command)
-            os.system(render_command)
+          render_command = "python render.py -s " + source + " -m " + exp_dir + render_args
+          print(render_command)
+          os.system(render_command)
 
-            train_dir = os.path.join(exp_dir, "train")
-            mesh_dir = os.listdir(train_dir)[0]
-            mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
-            #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-            #mesh_snapshot_from_file(mesh_file, snapshot_file)
+          train_dir = os.path.join(exp_dir, "train")
+          mesh_dir = os.listdir(train_dir)[0]
+          mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
+          #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
+          snapshot_file = os.path.join(train_dir, mesh_dir, "snapshot.png")
+          mesh_snapshot_from_file(mesh_file, snapshot_file)
 
-            subprocess.run(f'echo -n "{scene},{mode_name}," >> {metrics_file_ours}', shell=True, check=True)
-            cmd = (
-                f'python scripts/eval_dtu/evaluate_single_scene.py '
-                f'--input_mesh {mesh_file} '
-                f'--scan_id {scene.replace("scan","",1)} '
-                f'--mask_dir ../DTU/ '
-                f'--DTU ../DTU/ '
-                f'| sed "s/ /,/g" | grep ^[^cull] >> {metrics_file_ours}'
-            )
-            subprocess.run(cmd, shell=True, check=True)
+          subprocess.run(f'echo -n "{scene},{mode_name}," >> {metrics_file_ours}', shell=True, check=True)
+          cmd = (
+              f'python scripts/eval_dtu/evaluate_single_scene.py '
+              f'--input_mesh {mesh_file} '
+              f'--scan_id {scene.replace("scan","",1)} '
+              f'--mask_dir ../DTU/ '
+              f'--DTU ../DTU/ '
+              f'| sed "s/ /,/g" | grep ^[^cull] >> {metrics_file_ours}'
+          )
+          subprocess.run(cmd, shell=True, check=True)
 
-            ### --- 2DGS Baseline Code --- ###
-            # common_args = " --test_iterations -1 --depth_ratio 1.0 --lambda_dist 1000"
-            # exp_dir_2dgs = exp_dir + "_2dgs"
-            # train_cmd_2dgs = f"python {repo_dir_2dgs}/train.py -s " + source + " -m " + exp_dir_2dgs + common_args + " --time_limit " + str(time_limit)
-            # print(train_cmd_2dgs)
-            # os.system(train_cmd_2dgs)
+          ### --- 2DGS Baseline Code --- ###
+          # common_args = " --test_iterations -1 --depth_ratio 1.0 --lambda_dist 1000"
+          # exp_dir_2dgs = exp_dir + "_2dgs"
+          # train_cmd_2dgs = f"python {repo_dir_2dgs}/train.py -s " + source + " -m " + exp_dir_2dgs + common_args + " --time_limit " + str(time_limit)
+          # print(train_cmd_2dgs)
+          # os.system(train_cmd_2dgs)
 
-            # render_command = "python render.py -s " + source + " -m " + exp_dir_2dgs + render_args
-            # print(render_command)
-            # os.system(render_command)
+          # render_command = "python render.py -s " + source + " -m " + exp_dir_2dgs + render_args
+          # print(render_command)
+          # os.system(render_command)
 
-            # train_dir = os.path.join(exp_dir_2dgs, "train")
-            # mesh_dir = os.listdir(train_dir)[0]
-            # mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
-            # #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
-            # #mesh_snapshot_from_file(mesh_file, snapshot_file)
+          # train_dir = os.path.join(exp_dir_2dgs, "train")
+          # mesh_dir = os.listdir(train_dir)[0]
+          # mesh_file = os.path.join(train_dir, mesh_dir) + "/fuse_post.ply"
+          # #snapshot_file = exp_dir + "/train/ours_" + str(iter) + "/snapshot.png"
+          # #mesh_snapshot_from_file(mesh_file, snapshot_file)
 
-            # subprocess.run(f'echo -n "{scene}," >> {metrics_file_2dgs}', shell=True, check=True)
-            # cmd = (
-            #     f'python scripts/eval_dtu/evaluate_single_scene.py '
-            #     f'--input_mesh {mesh_file} '
-            #     f'--scan_id {scene.replace("scan","",1)} '
-            #     f'--mask_dir ../DTU/ '
-            #     f'--DTU ../DTU/ '
-            #     f'| sed "s/ /,/g" | grep ^[^cull] >> {metrics_file_2dgs}'
-            # )
-            # subprocess.run(cmd, shell=True, check=True)
+          # subprocess.run(f'echo -n "{scene}," >> {metrics_file_2dgs}', shell=True, check=True)
+          # cmd = (
+          #     f'python scripts/eval_dtu/evaluate_single_scene.py '
+          #     f'--input_mesh {mesh_file} '
+          #     f'--scan_id {scene.replace("scan","",1)} '
+          #     f'--mask_dir ../DTU/ '
+          #     f'--DTU ../DTU/ '
+          #     f'| sed "s/ /,/g" | grep ^[^cull] >> {metrics_file_2dgs}'
+          # )
+          # subprocess.run(cmd, shell=True, check=True)
+      try:
+        plot_metrics_from_runs(scene_dir, os.path.join(exp_dir, 'metrics.png'))
+      except Exception:
+          pass
