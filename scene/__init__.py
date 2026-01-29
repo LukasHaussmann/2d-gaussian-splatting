@@ -88,12 +88,13 @@ class Scene:
             else:
                 point_cloud = init_gaussians_with_corr_fast(args, self.gaussians, self, scene_info, device=torch.device('cuda'))
 
-            self.gaussians.create_from_pcd(point_cloud, self.cameras_extent, args.estimate_normals)
+            self.gaussians.create_from_pcd(point_cloud, self.cameras_extent, args.estimate_normals == 1, args.density_dependent_opacities == 1)
 
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
         self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
+
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]

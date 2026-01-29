@@ -3,8 +3,8 @@
 
 # Experiment settings
 experiment:
-  name: "fast_init_convergence_study"
-  output_dir: "evaluation_results/fast_init_convergence_study"
+  name: "final_convergence_study"
+  output_dir: "evaluation_results/final_convergence_study"
   dtu_source: "../DTU"
   repo_dir_2dgs: "~/2d-gaussian-splatting"
 
@@ -33,16 +33,39 @@ methods:
     fast_init: 1
     color: "#1f77b4"  # blue
     marker: "o"
+    time_budgets:  # per-method time checkpoints (in seconds)
+      - 30
+      - 40
+      - 50
+      - 60    # 1 min
+      - 90
+      - 120
+      - 150
+      - 180   # 3 min
   baseline_2dgs:
     name: "2DGS"
     fast_init: 0
     color: "#ff7f0e"  # orange
     marker: "s"
+    time_budgets:  # per-method time checkpoints (in seconds)
+      - 60    # 1 min
+      - 120
+      - 180   # 3 min
+      - 240
+      - 300   # 5 min
+      - 360
+      - 480
+      - 600   # 10 min
+      - 750
+      - 900   # 15 min
 
-# Time-based evaluation budgets (in seconds)
+# Default time-based evaluation budgets (in seconds)
+# Used as fallback if method doesn't specify time_budgets
 time_budgets:
   - 60    # 1 min
+  - 120
   - 180   # 3 min
+  - 240
   - 300   # 5 min
   - 600   # 10 min
   - 900   # 15 min
@@ -68,6 +91,7 @@ training:
   normal_estimate_knn: 20
   estimate_normals: 1
   roma_model: "Indoor"
+
 
   # Optimization parameters
   position_lr_init: 0.000016

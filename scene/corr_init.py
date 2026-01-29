@@ -2,8 +2,7 @@ import cv2
 from pytorch3d.renderer import PointsRasterizationSettings, PointsRasterizer
 from pytorch3d.structures import Pointclouds
 from pytorch3d.utils import cameras_from_opencv_projection
-from pytorch3d.ops import estimate_pointcloud_normals
-from pytorch3d.ops import knn_points
+from pytorch3d.ops import knn_points, estimate_pointcloud_normals
 from romatch import roma_outdoor, roma_indoor
 import torch
 import numpy as np
@@ -23,6 +22,91 @@ from utils.graphics_utils import BasicPointCloud
 from arguments import ModelParams
 import time
 from collections import defaultdict
+
+
+def estimate_normals_gpu(points: torch.Tensor, k: int = 20, batch_size: int = 20000) -> torch.Tensor:
+    """
+    Fast GPU-based normal estimation using pytorch3d's knn_points and batched PCA.
+    Processes points in batches to avoid OOM.
+
+    Args:
+        points: (N, 3) tensor of 3D points on GPU
+        k: number of neighbors for normal estimation
+        batch_size: number of query points to process at once
+
+    Returns:
+        normals: (N, 3) tensor of unit normals on GPU
+    """
+    device = points.device
+    N = points.shape[0]
+
+    # Full point cloud as reference (1, N, 3)
+    points_ref = points.unsqueeze(0)
+
+    all_normals = []
+
+    for start_idx in range(0, N, batch_size):
+        end_idx = min(start_idx + batch_size, N)
+        points_query = points[start_idx:end_idx].unsqueeze(0)  # (1, batch, 3)
+
+        # Find k nearest neighbors from full point cloud
+        knn_result = knn_points(points_query, points_ref, K=k, return_nn=True)
+        neighbors = knn_result.knn[0]  # (batch, K, 3)
+
+        # Center the neighborhoods
+        centroids = neighbors.mean(dim=1, keepdim=True)  # (batch, 1, 3)
+        centered = neighbors - centroids  # (batch, K, 3)
+
+        # Compute covariance matrices: (batch, 3, 3)
+        cov = torch.bmm(centered.transpose(1, 2), centered) / k
+
+        # Eigen decomposition - normals are eigenvectors with smallest eigenvalue
+        eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+
+        # Normal is the eigenvector corresponding to smallest eigenvalue (first column)
+        normals_batch = eigenvectors[:, :, 0]  # (batch, 3)
+        normals_batch = F.normalize(normals_batch, dim=1)
+
+        all_normals.append(normals_batch)
+
+    return torch.cat(all_normals, dim=0)
+
+
+def orient_normals_towards_cameras(
+    points: torch.Tensor,
+    normals: torch.Tensor,
+    camera_centers: torch.Tensor
+) -> torch.Tensor:
+    """
+    Orient normals to point towards the nearest camera.
+
+    Args:
+        points: (N, 3) tensor of 3D points
+        normals: (N, 3) tensor of normals
+        camera_centers: (C, 3) tensor of camera centers
+
+    Returns:
+        oriented_normals: (N, 3) tensor with consistently oriented normals
+    """
+    # Find nearest camera for each point
+    # points: (N, 3), camera_centers: (C, 3)
+    points_batch = points.unsqueeze(0)  # (1, N, 3)
+    cameras_batch = camera_centers.unsqueeze(0)  # (1, C, 3)
+
+    knn_result = knn_points(points_batch, cameras_batch, K=1, return_nn=True)
+    nearest_cameras = knn_result.knn[0, :, 0, :]  # (N, 3)
+
+    # Vector from point to camera
+    to_camera = nearest_cameras - points  # (N, 3)
+
+    # Flip normals that point away from camera
+    dot_product = (normals * to_camera).sum(dim=1, keepdim=True)  # (N, 1)
+    flip_mask = dot_product < 0
+
+    oriented_normals = torch.where(flip_mask, -normals, normals)
+
+    return oriented_normals
+
 
 def pairwise_distances(matrix):
     """
@@ -658,6 +742,7 @@ def align_depth_prediction(camera, points3d, rbg, model, vis_file=None):
     points_inv_depth_map = 1/(composited_depth + 1e-6)
 
     raw_img = cv2.imread(camera.image_path)
+    raw_img = cv2.resize(raw_img, (camera.image_width, camera.image_height))
     predicted_inv_depth_map_np = model.infer_image(raw_img) # HxW raw depth map in numpy
     predicted_inv_depth_map = torch.from_numpy(predicted_inv_depth_map_np).to(DEVICE)
 
@@ -887,20 +972,20 @@ def init_gaussians_with_corr(args : ModelParams, gaussians, scene, scene_info, d
     all_new_colors = np.concatenate(all_new_colors, axis=0)
 
     if args.estimate_normals == 1:
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-        o3d.utility.Vector3dVector()
+        #pc = o3d.geometry.PointCloud()
+        #pc.points = o3d.utility.Vector3dVector(all_new_xyz)
+        #o3d.utility.Vector3dVector()
         print("estimating normals")
-        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
+        #pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
+        #pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
 
-        #pts = torch.tensor(all_new_xyz).to("cuda").unsqueeze(0)
+        pts = torch.tensor(all_new_xyz).to(device).unsqueeze(0)
 
         # Estimate normals
         # returns [Batch, Points, 3]
-        #normals = estimate_pointcloud_normals(pts, neighborhood_size=args.normal_estimate_knn)
+        normals = estimate_pointcloud_normals(pts, neighborhood_size=args.normal_estimate_knn)
 
-        normals = np.asarray(pc.normals)
+        #normals = np.asarray(pc.normals)
 
         print("done estimating normals")
     else:
@@ -1142,29 +1227,25 @@ def init_gaussians_with_corr_fast(args : ModelParams, gaussians, scene, scene_in
     #new_tmp_radii = torch.zeros(all_new_xyz.shape[0])
     #prune_mask = torch.ones(all_new_xyz.shape[0], dtype=torch.bool)
 
-    all_new_xyz = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
+    all_new_xyz_np = np.asarray(all_new_xyz.cpu().numpy(), dtype=np.float64)
     normals = None
     if args.estimate_normals == 1:
-        #if args.per_view_normals == 0:
-        print("estimating normals")
-        pc = o3d.geometry.PointCloud()
-        pc.points = o3d.utility.Vector3dVector(all_new_xyz)
-        o3d.utility.Vector3dVector()
-        pc.estimate_normals(o3d.geometry.KDTreeSearchParamKNN(knn=args.normal_estimate_knn))
-        pc.orient_normals_consistent_tangent_plane(args.normal_estimate_knn)
-        normals = np.asarray(pc.normals)
+        print("estimating normals (GPU)")
+        pts = all_new_xyz.float()  # already on device
 
-        #pts = torch.tensor(all_new_xyz).to("cuda")
+        # Fast GPU-based normal estimation with batching
+        normals = estimate_normals_gpu(pts, k=args.normal_estimate_knn)
 
-        # Estimate normals
-        # returns [Batch, Points, 3]
-        #normals = estimate_normals_custom(pts, args.normal_estimate_knn)
-        #normals = estimate_pointcloud_normals(pts, disambiguate_directions=False, neighborhood_size=args.normal_estimate_knn)[0].cpu().numpy()
+        # Orient normals towards cameras
+        camera_centers = torch.stack([
+            torch.tensor(cam.camera_center, device=device, dtype=torch.float32)
+            for cam in viewpoint_stack
+        ])
+        normals = orient_normals_towards_cameras(pts, normals, camera_centers)
+        normals = normals.cpu().numpy()
+
         print("done estimating normals")
-
-        #else:
-        #    all_new_normals = np.concatenate(all_new_normals, axis=0)
-        #    normals = all_new_normals
+    all_new_xyz = all_new_xyz_np
 
     timings['final_densification_postfix'].append(time.time() - start)
 

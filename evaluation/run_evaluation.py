@@ -85,6 +85,7 @@ def run_training(
     train_args: str,
     time_limit: Optional[int] = None,
     iterations: Optional[int] = None,
+    time_checkpoints: Optional[List[int]] = None,
     use_2dgs_baseline: bool = False,
     repo_dir_2dgs: str = "~/2d-gaussian-splatting"
 ) -> bool:
@@ -98,12 +99,14 @@ def run_training(
     else:
         train_script = "train.py"
 
-    cmd = f"python {train_script} -s {source} -m {exp_dir} {train_args}"
+    cmd = f"python {train_script} -s {source} -m {exp_dir} -r 2 {train_args}"
 
     if time_limit is not None:
         cmd += f" --time_limit {time_limit}"
     if iterations is not None:
         cmd += f" --iterations {iterations}"
+    if time_checkpoints is not None and len(time_checkpoints) > 0:
+        cmd += " --time_checkpoints " + " ".join(str(t) for t in time_checkpoints)
 
     print(f"\n{'='*80}")
     print(f"Running: {cmd}")
@@ -157,12 +160,27 @@ def run_evaluation(
     return result.returncode == 0
 
 
-def find_mesh_file(exp_dir: str) -> Optional[str]:
-    """Find the generated mesh file in experiment directory."""
+def find_mesh_file(exp_dir: str, iteration: Optional[int] = None) -> Optional[str]:
+    """Find the generated mesh file in experiment directory.
+
+    Args:
+        exp_dir: Experiment directory path
+        iteration: Specific iteration to look for (e.g., for ours_1234/)
+    """
     train_dir = Path(exp_dir) / "train"
     if not train_dir.exists():
         return None
 
+    if iteration is not None:
+        # Look for specific iteration directory
+        iter_dir = train_dir / f"ours_{iteration}"
+        if iter_dir.exists():
+            mesh_file = iter_dir / "fuse_post.ply"
+            if mesh_file.exists():
+                return str(mesh_file)
+        return None
+
+    # Default: find any mesh
     subdirs = list(train_dir.iterdir())
     if not subdirs:
         return None
@@ -171,6 +189,21 @@ def find_mesh_file(exp_dir: str) -> Optional[str]:
     if mesh_file.exists():
         return str(mesh_file)
     return None
+
+
+def load_time_checkpoints_mapping(exp_dir: str) -> Dict[int, Dict[str, Any]]:
+    """Load the time checkpoints mapping from a training run.
+
+    Returns dict mapping time (seconds) -> {"iteration": int, "actual_time": float}
+    """
+    mapping_file = Path(exp_dir) / "time_checkpoints.json"
+    if not mapping_file.exists():
+        return {}
+
+    with open(mapping_file) as f:
+        # JSON keys are strings like "60.0", convert to int via float
+        raw_mapping = yaml.safe_load(f)
+        return {int(float(k)): v for k, v in raw_mapping.items()}
 
 
 def create_mesh_snapshot(mesh_file: str, snapshot_file: str) -> None:
@@ -187,13 +220,23 @@ def run_time_based_evaluation(
     scenes: List[str],
     time_budgets: List[int],
     output_dir: Path,
-    resume: bool = True
+    resume: bool = True,
+    time_budgets_per_method: Optional[Dict[str, List[int]]] = None,
 ) -> None:
     """
     Run time-based evaluation across all scenes and time budgets.
 
-    For each time budget, trains both our method and baseline 2DGS,
-    then evaluates the resulting meshes.
+    Runs a single training per scene that saves at all time checkpoints,
+    then evaluates the meshes at each checkpoint for convergence analysis.
+
+    Args:
+        config: Configuration dict
+        scenes: List of scene names to evaluate
+        time_budgets: Default time budgets (used if time_budgets_per_method not specified)
+        output_dir: Output directory for results
+        resume: Whether to resume from previous runs
+        time_budgets_per_method: Optional dict mapping method name to list of time budgets
+                                 e.g., {"ours": [60, 120, 180], "baseline_2dgs": [60, 180, 360, 720]}
     """
     dtu_source = config['experiment']['dtu_source']
     repo_dir_2dgs = config['experiment']['repo_dir_2dgs']
@@ -204,89 +247,133 @@ def run_time_based_evaluation(
 
     time_dir = output_dir / "time_based"
 
-    for time_limit in time_budgets:
-        time_label = format_time_budget(time_limit)
-        print(f"\n{'#'*80}")
-        print(f"# Time budget: {time_label} ({time_limit}s)")
-        print(f"{'#'*80}")
+    # Determine time budgets for each method
+    if time_budgets_per_method is None:
+        time_budgets_per_method = {
+            "ours": time_budgets,
+            "baseline_2dgs": time_budgets,
+        }
 
-        # Setup directories
-        ours_dir = time_dir / f"{time_limit}s" / "ours"
-        baseline_dir = time_dir / f"{time_limit}s" / "baseline_2dgs"
-        ensure_dir(ours_dir)
-        ensure_dir(baseline_dir)
+    time_budgets_ours = time_budgets_per_method.get("ours", time_budgets)
+    time_budgets_baseline = time_budgets_per_method.get("baseline_2dgs", time_budgets)
 
-        # Metrics files
-        metrics_ours = time_dir / f"{time_limit}s" / "metrics_ours.csv"
-        metrics_baseline = time_dir / f"{time_limit}s" / "metrics_baseline.csv"
+    max_time_ours = max(time_budgets_ours)
+    max_time_baseline = max(time_budgets_baseline)
 
-        # Initialize metrics files
-        header = "scan,accuracy,completeness,overall"
-        for mf in [metrics_ours, metrics_baseline]:
-            if not mf.exists():
-                mf.write_text(header + "\n")
+    # Setup directories for each method
+    ours_dir = time_dir / "ours"
+    baseline_dir = time_dir / "baseline_2dgs"
+    ensure_dir(ours_dir)
+    ensure_dir(baseline_dir)
 
-        for scene in scenes:
-            scan_id = parse_scan_id(scene)
-            source = f"{dtu_source}/{scene}"
+    # Initialize metrics files for each time checkpoint
+    header = "scan,accuracy,completeness,overall"
+    for time_budget in time_budgets_ours:
+        metrics_file = ours_dir / f"metrics_{time_budget}s.csv"
+        if not metrics_file.exists():
+            metrics_file.write_text(header + "\n")
+    for time_budget in time_budgets_baseline:
+        metrics_file = baseline_dir / f"metrics_{time_budget}s.csv"
+        if not metrics_file.exists():
+            metrics_file.write_text(header + "\n")
 
-            # --- Our method ---
-            exp_dir_ours = ours_dir / scene
-            marker_ours = exp_dir_ours / ".complete"
+    for scene in scenes:
+        scan_id = parse_scan_id(scene)
+        source = f"{dtu_source}/{scene}"
 
-            if resume and marker_exists(marker_ours):
-                print(f"Skipping {scene} (ours) - already complete")
-            else:
-                print(f"\n--- Training {scene} with our method ({time_label}) ---")
-                run_training(
-                    source=source,
-                    exp_dir=str(exp_dir_ours),
-                    train_args=train_args_ours,
-                    time_limit=time_limit
+        # --- Our method ---
+        exp_dir_ours = ours_dir / scene
+        marker_ours = exp_dir_ours / ".train_complete"
+
+        # Train once with all time checkpoints
+        if resume and marker_exists(marker_ours):
+            print(f"Skipping training {scene} (ours) - already complete")
+        else:
+            print(f"\n--- Training {scene} with our method (max {max_time_ours}s, checkpoints: {time_budgets_ours}) ---")
+            run_training(
+                source=source,
+                exp_dir=str(exp_dir_ours),
+                train_args=train_args_ours,
+                time_limit=max_time_ours,
+                time_checkpoints=time_budgets_ours
+            )
+            create_marker_file(marker_ours)
+
+        # Evaluate at each time checkpoint
+        time_mapping = load_time_checkpoints_mapping(str(exp_dir_ours))
+        for time_budget in time_budgets_ours:
+            marker_eval = exp_dir_ours / f".eval_{time_budget}s_complete"
+            if resume and marker_exists(marker_eval):
+                print(f"Skipping evaluation {scene} (ours) at {time_budget}s - already complete")
+                continue
+
+            if time_budget not in time_mapping:
+                print(f"Warning: No checkpoint found for {time_budget}s in {scene} (ours)")
+                continue
+
+            iteration = time_mapping[time_budget]["iteration"]
+            print(f"\n--- Evaluating {scene} (ours) at {time_budget}s (iter {iteration}) ---")
+
+            # Render mesh at this iteration
+            render_args_iter = f"{render_args} --iteration {iteration}"
+            run_rendering(source, str(exp_dir_ours), render_args_iter)
+
+            mesh_file = find_mesh_file(str(exp_dir_ours), iteration=iteration)
+            if mesh_file:
+                metrics_file = ours_dir / f"metrics_{time_budget}s.csv"
+                run_evaluation(
+                    mesh_file, scan_id, dtu_source, dtu_source,
+                    str(metrics_file), scene
                 )
-                run_rendering(source, str(exp_dir_ours), render_args)
+                create_marker_file(marker_eval)
 
-                mesh_file = find_mesh_file(str(exp_dir_ours))
-                if mesh_file:
-                    create_mesh_snapshot(
-                        mesh_file,
-                        str(exp_dir_ours / "train" / "snapshot.png")
-                    )
-                    run_evaluation(
-                        mesh_file, scan_id, dtu_source, dtu_source,
-                        str(metrics_ours), scene
-                    )
-                    create_marker_file(marker_ours)
+        # --- Baseline 2DGS ---
+        exp_dir_baseline = baseline_dir / scene
+        marker_baseline = exp_dir_baseline / ".train_complete"
 
-            # --- Baseline 2DGS ---
-            exp_dir_baseline = baseline_dir / scene
-            marker_baseline = exp_dir_baseline / ".complete"
+        # Train once with all time checkpoints (if baseline supports it)
+        if resume and marker_exists(marker_baseline):
+            print(f"Skipping training {scene} (baseline) - already complete")
+        else:
+            print(f"\n--- Training {scene} with 2DGS baseline (max {max_time_baseline}s, checkpoints: {time_budgets_baseline}) ---")
+            run_training(
+                source=source,
+                exp_dir=str(exp_dir_baseline),
+                train_args=train_args_baseline,
+                time_limit=max_time_baseline,
+                time_checkpoints=time_budgets_baseline,
+                use_2dgs_baseline=True,
+                repo_dir_2dgs=repo_dir_2dgs
+            )
+            create_marker_file(marker_baseline)
 
-            if resume and marker_exists(marker_baseline):
-                print(f"Skipping {scene} (baseline) - already complete")
-            else:
-                print(f"\n--- Training {scene} with 2DGS baseline ({time_label}) ---")
-                run_training(
-                    source=source,
-                    exp_dir=str(exp_dir_baseline),
-                    train_args=train_args_baseline,
-                    time_limit=time_limit,
-                    use_2dgs_baseline=True,
-                    repo_dir_2dgs=repo_dir_2dgs
+        # Evaluate at each time checkpoint
+        time_mapping = load_time_checkpoints_mapping(str(exp_dir_baseline))
+        for time_budget in time_budgets_baseline:
+            marker_eval = exp_dir_baseline / f".eval_{time_budget}s_complete"
+            if resume and marker_exists(marker_eval):
+                print(f"Skipping evaluation {scene} (baseline) at {time_budget}s - already complete")
+                continue
+
+            if time_budget not in time_mapping:
+                print(f"Warning: No checkpoint found for {time_budget}s in {scene} (baseline)")
+                continue
+
+            iteration = time_mapping[time_budget]["iteration"]
+            print(f"\n--- Evaluating {scene} (baseline) at {time_budget}s (iter {iteration}) ---")
+
+            # Render mesh at this iteration
+            render_args_iter = f"{render_args} --iteration {iteration}"
+            run_rendering(source, str(exp_dir_baseline), render_args_iter)
+
+            mesh_file = find_mesh_file(str(exp_dir_baseline), iteration=iteration)
+            if mesh_file:
+                metrics_file = baseline_dir / f"metrics_{time_budget}s.csv"
+                run_evaluation(
+                    mesh_file, scan_id, dtu_source, dtu_source,
+                    str(metrics_file), scene
                 )
-                run_rendering(source, str(exp_dir_baseline), render_args)
-
-                mesh_file = find_mesh_file(str(exp_dir_baseline))
-                if mesh_file:
-                    create_mesh_snapshot(
-                        mesh_file,
-                        str(exp_dir_baseline / "train" / "snapshot.png")
-                    )
-                    run_evaluation(
-                        mesh_file, scan_id, dtu_source, dtu_source,
-                        str(metrics_baseline), scene
-                    )
-                    create_marker_file(marker_baseline)
+                create_marker_file(marker_eval)
 
 
 def run_iteration_based_evaluation(
@@ -376,7 +463,21 @@ def main():
         nargs="+",
         type=int,
         default=None,
-        help="Time budgets in seconds (overrides config)"
+        help="Time budgets in seconds for both methods (overrides config)"
+    )
+    parser.add_argument(
+        "--time-budgets-ours",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Time budgets in seconds for 'ours' method only"
+    )
+    parser.add_argument(
+        "--time-budgets-baseline",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Time budgets in seconds for '2DGS baseline' method only"
     )
     parser.add_argument(
         "--skip-time-based",
@@ -416,6 +517,26 @@ def main():
     time_budgets = config['time_budgets']
     iteration_checkpoints = config['iteration_checkpoints']
 
+    # Build per-method time budgets from config
+    time_budgets_per_method = {}
+    methods_config = config.get('methods', {})
+    for method_name, method_cfg in methods_config.items():
+        if 'time_budgets' in method_cfg:
+            time_budgets_per_method[method_name] = method_cfg['time_budgets']
+
+    # If no per-method budgets found in config, use default for all methods
+    if not time_budgets_per_method:
+        time_budgets_per_method = None
+
+    # Command-line arguments override config values
+    if args.time_budgets_ours or args.time_budgets_baseline:
+        if time_budgets_per_method is None:
+            time_budgets_per_method = {}
+        if args.time_budgets_ours:
+            time_budgets_per_method["ours"] = args.time_budgets_ours
+        if args.time_budgets_baseline:
+            time_budgets_per_method["baseline_2dgs"] = args.time_budgets_baseline
+
     # Setup output directory
     output_dir = Path(config['experiment']['output_dir'])
     ensure_dir(output_dir)
@@ -425,7 +546,11 @@ def main():
 
     print(f"Output directory: {output_dir}")
     print(f"Scenes: {scenes}")
-    print(f"Time budgets: {time_budgets}")
+    if time_budgets_per_method:
+        print(f"Time budgets (ours): {time_budgets_per_method['ours']}")
+        print(f"Time budgets (baseline): {time_budgets_per_method['baseline_2dgs']}")
+    else:
+        print(f"Time budgets: {time_budgets}")
     print(f"Iteration checkpoints: {iteration_checkpoints}")
 
     if args.dry_run:
@@ -440,7 +565,8 @@ def main():
         print("TIME-BASED EVALUATION")
         print("="*80)
         run_time_based_evaluation(
-            config, scenes, time_budgets, output_dir, resume
+            config, scenes, time_budgets, output_dir, resume,
+            time_budgets_per_method=time_budgets_per_method
         )
 
     if not args.skip_iteration_based:

@@ -38,57 +38,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-# -- New function for automated rendering of images at certain checkpoints --
-# def render_checkpoint(model_path, iteration, views, gaussians, pipeline, background):
-#     """
-#     Automated evaluation: Renders specific views and saves RGB + Normals.
-#     Calculates PSNR, SSIM, and LPIPS.
-#     """
-#     render_path = os.path.join(model_path, "progress_renders", f"iteration_{iteration}")
-#     os.makedirs(render_path, exist_ok=True)
-    
-#     # Initialize Metrics
-#     psnr_accum = 0.0
-#     ssim_accum = 0.0
-    
-#     # Render first 5 views for speed
-#     subset_views = views[:5] 
-
-#     for idx, view in enumerate(subset_views):
-#         # Render
-#         render_pkg = render(view, gaussians, pipeline, background)
-#         image = render_pkg["render"]
-        
-#         # --- ROBUST FIX: Force device and Clamp ---
-#         image = torch.clamp(image, 0.0, 1.0).to("cuda")
-#         gt = torch.clamp(view.original_image[0:3, :, :], 0.0, 1.0).to("cuda")
-#         # ------------------------------------------
-
-#         # Save Normal Maps (visualize as RGB)
-#         if "rend_normal" in render_pkg:
-#             # rend_normal is [-1, 1], convert to [0, 1] for saving
-#             normal_vis = (render_pkg["rend_normal"] * 0.5 + 0.5).to("cuda")
-#             torchvision.utils.save_image(normal_vis, os.path.join(render_path, f"{view.image_name}_normal.png"))
-
-#         # Save RGB
-#         torchvision.utils.save_image(image, os.path.join(render_path, f"{view.image_name}_rgb.png"))
-        
-#         # --- Metrics Calculation ---
-#         psnr_accum += psnr(image, gt).mean().double()
-#         ssim_accum += ssim(image, gt).mean().double()
-
-#     # Average metrics
-#     avg_psnr = psnr_accum / len(subset_views)
-#     avg_ssim = ssim_accum / len(subset_views)
-
-#     # Log metrics
-#     log_file = os.path.join(model_path, "progress_log.txt")
-#     with open(log_file, "a") as f:
-#         f.write(f"Iter {iteration}: PSNR={avg_psnr:.4f}, SSIM={avg_ssim:.4f}\n")
-    
-#     print(f"\n[ITER {iteration}] Checkpoint rendered. PSNR: {avg_psnr:.4f}")
-    
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, time_checkpoints=None):
     first_iter = 0
     #start_time = time.time()
     timer = Timer()
@@ -97,6 +47,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+
+    # Track time checkpoints
+    if time_checkpoints is None:
+        time_checkpoints = []
+    time_checkpoints = sorted(time_checkpoints)
+    saved_time_checkpoints = {}  # Maps time -> iteration for saved checkpoints
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -264,6 +220,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("Elapsed time: ", timer.get_elapsed_time())
                 scene.save(iteration)
                 timer.start()
+
+            # Save at time checkpoints (multiple checkpoints in a single run)
+            current_time = timer.get_elapsed_time()
+            for tc in time_checkpoints:
+                if tc not in saved_time_checkpoints and current_time >= tc:
+                    timer.pause()
+                    print(f"\n[ITER {iteration}] Saving time checkpoint at {tc}s (actual: {current_time:.1f}s)")
+                    scene.save(iteration)
+                    saved_time_checkpoints[tc] = {"iteration": iteration, "actual_time": current_time}
+                    # Save the time->iteration mapping file
+                    import json
+                    mapping_path = os.path.join(scene.model_path, "time_checkpoints.json")
+                    with open(mapping_path, 'w') as f:
+                        json.dump(saved_time_checkpoints, f, indent=2)
+                    timer.start()
+
             if (opt.time_limit > 0 and timer.get_elapsed_time() >= opt.time_limit):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 print("Elapsed time: ", timer.get_elapsed_time())
@@ -554,6 +526,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--time_checkpoints", nargs="+", type=float, default=[], help="Time checkpoints (in seconds) to save model during training")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -565,7 +538,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.time_checkpoints)
 
     # All done
     print("\nTraining complete.")

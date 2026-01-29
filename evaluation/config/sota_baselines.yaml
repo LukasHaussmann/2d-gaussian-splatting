@@ -26,18 +26,12 @@ methods:
     source: "Darmon et al., CVPR 2022"
     category: "neural_implicit"
 
-  Neuralangelo:
-    accuracy: 0.37
-    completeness: 0.36
-    overall: 0.37
-    source: "Li et al., CVPR 2023"
-    category: "neural_implicit"
-
   # Gaussian Splatting Methods
   3DGS:
     accuracy: 1.30
     completeness: 1.52
     overall: 1.41
+    runtime: "7min"
     source: "Kerbl et al., SIGGRAPH 2023"
     category: "gaussian_splatting"
 
@@ -45,6 +39,7 @@ methods:
     accuracy: 0.48
     completeness: 0.43
     overall: 0.45
+    runtime: "15min"
     source: "Huang et al., SIGGRAPH 2024"
     category: "gaussian_splatting"
 
@@ -52,6 +47,7 @@ methods:
     accuracy: 0.76
     completeness: 0.72
     overall: 0.74
+    runtime: "50min"
     source: "Guédon et al., CVPR 2024"
     category: "gaussian_splatting"
 
@@ -74,62 +70,98 @@ methods:
 # These are reference values from 30k iterations full training
 per_scene_2dgs:
   scan24:
-    accuracy: 0.45
-    completeness: 0.35
-    overall: 0.40
+    overall: 0.48
   scan37:
-    accuracy: 0.68
-    completeness: 0.55
-    overall: 0.61
+    overall: 0.91
   scan40:
-    accuracy: 0.35
-    completeness: 0.33
-    overall: 0.34
+    overall: 0.39
   scan55:
-    accuracy: 0.34
-    completeness: 0.30
-    overall: 0.32
+    overall: 0.39
   scan63:
-    accuracy: 0.52
-    completeness: 0.40
-    overall: 0.46
+    overall: 1.01
   scan65:
-    accuracy: 0.55
-    completeness: 0.50
-    overall: 0.53
+    overall: 0.83
   scan69:
-    accuracy: 0.48
-    completeness: 0.38
-    overall: 0.43
+    overall: 0.81
   scan83:
-    accuracy: 0.58
-    completeness: 0.48
-    overall: 0.53
+    overall: 1.36
   scan97:
-    accuracy: 0.55
-    completeness: 0.42
-    overall: 0.49
+    overall: 1.27
   scan105:
-    accuracy: 0.52
-    completeness: 0.50
-    overall: 0.51
+    overall: 0.76
   scan106:
-    accuracy: 0.45
-    completeness: 0.38
-    overall: 0.41
+    overall: 0.70
   scan110:
-    accuracy: 0.65
-    completeness: 0.55
-    overall: 0.60
+    overall: 1.40
   scan114:
-    accuracy: 0.38
-    completeness: 0.32
-    overall: 0.35
-  scan118:
-    accuracy: 0.42
-    completeness: 0.38
     overall: 0.40
+  scan118:
+    overall: 0.76
   scan122:
-    accuracy: 0.48
-    completeness: 0.42
-    overall: 0.45
+    overall: 0.52
+
+# Per-scene results for 3DGS
+per_scene_3dgs:
+  scan24:
+    overall: 2.14
+  scan37:
+    overall: 1.53
+  scan40:
+    overall: 2.08
+  scan55:
+    overall: 1.68
+  scan63:
+    overall: 3.49
+  scan65:
+    overall: 2.21
+  scan69:
+    overall: 1.43
+  scan83:
+    overall: 2.07
+  scan97:
+    overall: 2.22
+  scan105:
+    overall: 1.75
+  scan106:
+    overall: 1.79
+  scan110:
+    overall: 2.55
+  scan114:
+    overall: 1.53
+  scan118:
+    overall: 1.52
+  scan122:
+    overall: 1.50
+
+# Per-scene results for SuGaR
+per_scene_sugar:
+  scan24:
+    overall: 1.47
+  scan37:
+    overall: 1.33
+  scan40:
+    overall: 1.13
+  scan55:
+    overall: 0.61
+  scan63:
+    overall: 2.25
+  scan65:
+    overall: 1.71
+  scan69:
+    overall: 1.15
+  scan83:
+    overall: 1.63
+  scan97:
+    overall: 1.62
+  scan105:
+    overall: 1.07
+  scan106:
+    overall: 0.79
+  scan110:
+    overall: 2.45
+  scan114:
+    overall: 0.98
+  scan118:
+    overall: 0.88
+  scan122:
+    overall: 0.79
