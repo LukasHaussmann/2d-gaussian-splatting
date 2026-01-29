@@ -1,0 +1,120 @@
+# Default configuration for 2DGS fast convergence evaluation
+# ==========================================================
+
+# Experiment settings
+experiment:
+  name: "fast_init_convergence_study"
+  output_dir: "evaluation_results/fast_init_convergence_study"
+  dtu_source: "../DTU"
+  repo_dir_2dgs: "~/2d-gaussian-splatting"
+
+# DTU scenes to evaluate (15 total)
+scenes:
+  - scan24
+  - scan37
+  - scan40
+  - scan55
+  - scan63
+  - scan65
+  - scan69
+  - scan83
+  - scan97
+  - scan105
+  - scan106
+  - scan110
+  - scan114
+  - scan118
+  - scan122
+
+# Methods to compare
+methods:
+  ours:
+    name: "Ours (Fast Init)"
+    fast_init: 1
+    color: "#1f77b4"  # blue
+    marker: "o"
+  baseline_2dgs:
+    name: "2DGS"
+    fast_init: 0
+    color: "#ff7f0e"  # orange
+    marker: "s"
+
+# Time-based evaluation budgets (in seconds)
+time_budgets:
+  - 60    # 1 min
+  - 180   # 3 min
+  - 300   # 5 min
+  - 600   # 10 min
+  - 900   # 15 min
+
+# Iteration-based evaluation checkpoints
+iteration_checkpoints:
+  - 500
+  - 1000
+  - 2000
+  - 3000
+  - 5000
+  - 7000
+  - 10000
+  - 15000
+  - 30000
+
+# Training configuration (shared settings)
+training:
+  matches_per_ref: 15000
+  nns_per_ref: 3
+  scaling_factor: 0.001
+  proj_err_tolerance: 0.01
+  normal_estimate_knn: 20
+  estimate_normals: 1
+  roma_model: "Indoor"
+
+  # Optimization parameters
+  position_lr_init: 0.000016
+  position_lr_final: 0.0000016
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 0.0025
+  opacity_lr: 0.025
+  scaling_lr: 0.005
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  lambda_dist: 0.0
+  lambda_normal: 0.01
+  densify_from_iter: 0
+  dist_reg_from: 0
+  normal_reg_from: 0
+  opacity_cull: 0.005
+  densification_interval: 100
+  opacity_reset_interval: 30000
+  densify_until_iter: 0
+  densify_grad_threshold: 0.0002
+
+# Rendering configuration
+rendering:
+  skip_train: true
+  depth_ratio: 1.0
+  num_cluster: 1
+  voxel_size: 0.004
+  sdf_trunc: 0.016
+  depth_trunc: 3.0
+
+# 2DGS baseline specific settings
+baseline_2dgs_training:
+  test_iterations: -1
+  depth_ratio: 1.0
+  lambda_dist: 1000
+
+# Figure styling
+figure_style:
+  dpi: 300
+  font_family: "serif"
+  font_size: 12
+  title_size: 14
+  legend_size: 10
+  line_width: 2.0
+  marker_size: 8
+  figure_width: 10
+  figure_height: 6
+  grid_alpha: 0.3

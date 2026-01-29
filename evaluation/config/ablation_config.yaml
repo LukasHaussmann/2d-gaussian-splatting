@@ -1,0 +1,202 @@
+# Ablation Study Configuration
+# =============================
+# Define ablation experiments to evaluate contribution of each component
+
+experiment:
+  name: "ablation_study"
+  output_dir: "evaluation_results/ablation_study"
+  dtu_source: "../DTU"
+
+# Scenes for ablation (subset for faster iteration)
+# Can use full 15 scenes for final results
+scenes:
+  - scan24
+  - scan37
+  - scan40
+  - scan55
+  - scan63
+
+# Time budget for ablation experiments (seconds)
+time_budget: 300  # 5 minutes
+
+# Base configuration (our full method)
+base_config:
+  fast_init: 1
+  matches_per_ref: 15000
+  nns_per_ref: 3
+  scaling_factor: 0.001
+  proj_err_tolerance: 0.01
+  normal_estimate_knn: 20
+  estimate_normals: 1
+  roma_model: "Indoor"
+
+  # Optimization parameters
+  position_lr_init: 0.000016
+  position_lr_final: 0.0000016
+  position_lr_delay_mult: 0.01
+  position_lr_max_steps: 30000
+  feature_lr: 0.0025
+  opacity_lr: 0.025
+  scaling_lr: 0.005
+  rotation_lr: 0.001
+  percent_dense: 0.01
+  lambda_dssim: 0.2
+  lambda_dist: 0.0
+  lambda_normal: 0.01
+  densify_from_iter: 0
+  densify_until_iter: 0
+  densification_interval: 100
+  opacity_cull: 0.005
+
+# Ablation experiments
+# Each ablation modifies specific parameters from base_config
+ablations:
+  # --- Initialization Method Ablations ---
+  no_fast_init:
+    name: "Without Fast Init (Random)"
+    description: "Standard random initialization without dense correspondences"
+    changes:
+      fast_init: 0
+    category: "initialization"
+
+  sparse_matches:
+    name: "Sparse Matches (5k)"
+    description: "Reduced number of correspondence matches"
+    changes:
+      matches_per_ref: 5000
+    category: "initialization"
+
+  dense_matches:
+    name: "Dense Matches (30k)"
+    description: "Increased number of correspondence matches"
+    changes:
+      matches_per_ref: 30000
+    category: "initialization"
+
+  # --- Normal Estimation Ablations ---
+  no_normals:
+    name: "Without Normal Estimation"
+    description: "Disable normal estimation during initialization"
+    changes:
+      estimate_normals: 0
+    category: "normals"
+
+  small_normal_knn:
+    name: "Normal KNN=10"
+    description: "Smaller neighborhood for normal estimation"
+    changes:
+      normal_estimate_knn: 10
+    category: "normals"
+
+  large_normal_knn:
+    name: "Normal KNN=50"
+    description: "Larger neighborhood for normal estimation"
+    changes:
+      normal_estimate_knn: 50
+    category: "normals"
+
+  # --- Matching Parameters Ablations ---
+  nns_1:
+    name: "1 NN per Reference"
+    description: "Single nearest neighbor matching"
+    changes:
+      nns_per_ref: 1
+    category: "matching"
+
+  nns_5:
+    name: "5 NNs per Reference"
+    description: "More nearest neighbors for denser coverage"
+    changes:
+      nns_per_ref: 5
+    category: "matching"
+
+  strict_proj_err:
+    name: "Strict Projection Error (0.005)"
+    description: "Stricter filtering of correspondences"
+    changes:
+      proj_err_tolerance: 0.005
+    category: "matching"
+
+  loose_proj_err:
+    name: "Loose Projection Error (0.02)"
+    description: "More lenient filtering of correspondences"
+    changes:
+      proj_err_tolerance: 0.02
+    category: "matching"
+
+  # --- Scale Factor Ablations ---
+  small_scale:
+    name: "Small Scale (0.0005)"
+    description: "Smaller initial Gaussian scale"
+    changes:
+      scaling_factor: 0.0005
+    category: "scale"
+
+  large_scale:
+    name: "Large Scale (0.002)"
+    description: "Larger initial Gaussian scale"
+    changes:
+      scaling_factor: 0.002
+    category: "scale"
+
+  # --- Roma Model Ablations ---
+  roma_outdoor:
+    name: "RoMa Outdoor Model"
+    description: "Using outdoor-trained RoMa model"
+    changes:
+      roma_model: "Outdoor"
+    category: "matcher"
+
+  # --- Optimization Ablations ---
+  no_normal_reg:
+    name: "Without Normal Regularization"
+    description: "Disable normal consistency loss"
+    changes:
+      lambda_normal: 0.0
+    category: "optimization"
+
+  strong_normal_reg:
+    name: "Strong Normal Regularization"
+    description: "Increased normal consistency weight"
+    changes:
+      lambda_normal: 0.05
+    category: "optimization"
+
+  with_densification:
+    name: "With Densification"
+    description: "Enable adaptive densification"
+    changes:
+      densify_until_iter: 15000
+      densify_from_iter: 500
+    category: "optimization"
+
+# Ablation groups for organized tables
+ablation_groups:
+  initialization:
+    name: "Initialization Strategy"
+    experiments: ["no_fast_init", "sparse_matches", "dense_matches"]
+
+  normals:
+    name: "Normal Estimation"
+    experiments: ["no_normals", "small_normal_knn", "large_normal_knn"]
+
+  matching:
+    name: "Correspondence Matching"
+    experiments: ["nns_1", "nns_5", "strict_proj_err", "loose_proj_err"]
+
+  scale:
+    name: "Initial Scale"
+    experiments: ["small_scale", "large_scale"]
+
+  optimization:
+    name: "Optimization Settings"
+    experiments: ["no_normal_reg", "strong_normal_reg", "with_densification"]
+
+# Rendering configuration (same as main evaluation)
+rendering:
+  skip_train: true
+  depth_ratio: 1.0
+  num_cluster: 1
+  voxel_size: 0.004
+  sdf_trunc: 0.016
+  depth_trunc: 3.0
