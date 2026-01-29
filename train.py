@@ -180,49 +180,49 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         
         total_loss.backward()
 
-        # =================== GRADIENT VISUALIZATION CODE ===================
-        if iteration == 7000:
-            print(f"\n[ITER {iteration}] Exporting Gradient Heatmap...")
-            try:
-                grads = viewspace_point_tensor.grad
-                if grads is not None:
-                    grad_norms = torch.norm(grads, dim=-1)
+        # # =================== GRADIENT VISUALIZATION CODE ===================
+        # if iteration == 7000:
+        #     print(f"\n[ITER {iteration}] Exporting Gradient Heatmap...")
+        #     try:
+        #         grads = viewspace_point_tensor.grad
+        #         if grads is not None:
+        #             grad_norms = torch.norm(grads, dim=-1)
                     
-                    # Normalize for visualization
-                    max_grad = torch.quantile(grad_norms, 0.99)
-                    normalized_grads = torch.clamp(grad_norms / max_grad, 0, 1)
+        #             # Normalize for visualization
+        #             max_grad = torch.quantile(grad_norms, 0.99)
+        #             normalized_grads = torch.clamp(grad_norms / max_grad, 0, 1)
                     
-                    # Apply Colormap
-                    grad_np = normalized_grads.detach().cpu().numpy()
-                    cmap = plt.get_cmap('jet')
-                    colors_rgba = cmap(grad_np) 
-                    colors_rgb = colors_rgba[:, :3] 
+        #             # Apply Colormap
+        #             grad_np = normalized_grads.detach().cpu().numpy()
+        #             cmap = plt.get_cmap('jet')
+        #             colors_rgba = cmap(grad_np) 
+        #             colors_rgb = colors_rgba[:, :3] 
 
-                    # Construct PLY
-                    xyz = gaussians.get_xyz.detach().cpu().numpy()
-                    dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
-                             ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
-                    elements = np.empty(xyz.shape[0], dtype=dtype)
+        #             # Construct PLY
+        #             xyz = gaussians.get_xyz.detach().cpu().numpy()
+        #             dtype = [('x', 'f4'), ('y', 'f4'), ('z', 'f4'), 
+        #                      ('red', 'u1'), ('green', 'u1'), ('blue', 'u1')]
+        #             elements = np.empty(xyz.shape[0], dtype=dtype)
                     
-                    elements['x'] = xyz[:, 0]
-                    elements['y'] = xyz[:, 1]
-                    elements['z'] = xyz[:, 2]
-                    elements['red']   = (colors_rgb[:, 0] * 255).astype(np.uint8)
-                    elements['green'] = (colors_rgb[:, 1] * 255).astype(np.uint8)
-                    elements['blue']  = (colors_rgb[:, 2] * 255).astype(np.uint8)
+        #             elements['x'] = xyz[:, 0]
+        #             elements['y'] = xyz[:, 1]
+        #             elements['z'] = xyz[:, 2]
+        #             elements['red']   = (colors_rgb[:, 0] * 255).astype(np.uint8)
+        #             elements['green'] = (colors_rgb[:, 1] * 255).astype(np.uint8)
+        #             elements['blue']  = (colors_rgb[:, 2] * 255).astype(np.uint8)
                     
-                    # Save
-                    heatmap_path = os.path.join(scene.model_path, "point_cloud", f"iteration_{iteration}", "gradient_heatmap.ply")
-                    os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
+        #             # Save
+        #             heatmap_path = os.path.join(scene.model_path, "point_cloud", f"iteration_{iteration}", "gradient_heatmap.ply")
+        #             os.makedirs(os.path.dirname(heatmap_path), exist_ok=True)
                     
-                    # Use 'plyfile' directly (assuming it is installed via pip)
-                    from plyfile import PlyData, PlyElement
-                    el = PlyElement.describe(elements, 'vertex')
-                    PlyData([el]).write(heatmap_path)
-                    print(f"Saved Gradient Heatmap to: {heatmap_path}")
-            except Exception as e:
-                print(f"Visualization failed: {e}")
-        # ===================================================================
+        #             # Use 'plyfile' directly (assuming it is installed via pip)
+        #             from plyfile import PlyData, PlyElement
+        #             el = PlyElement.describe(elements, 'vertex')
+        #             PlyData([el]).write(heatmap_path)
+        #             print(f"Saved Gradient Heatmap to: {heatmap_path}")
+        #     except Exception as e:
+        #         print(f"Visualization failed: {e}")
+        # # ===================================================================
         iter_end.record()
 
         with torch.no_grad():
