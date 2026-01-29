@@ -159,7 +159,7 @@ class GaussianModel:
         
         return quats
 
-    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, use_normals: bool):
+    def create_from_pcd(self, pcd : BasicPointCloud, spatial_lr_scale : float, use_normals: bool, density_dependent_opacities = True):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
@@ -182,14 +182,16 @@ class GaussianModel:
         # We clamp to a small epsilon (e.g., 0.005) to ensure valid input for the inverse sigmoid
         target_opacity = torch.clamp(0.35 * density_score, min=0.005, max=0.99)
         # Reshape to (N, 1) and apply inverse activation
-        opacities = self.inverse_opacity_activation(target_opacity[..., None])
+        if density_dependent_opacities:
+            opacities = self.inverse_opacity_activation(target_opacity[..., None])
+        else:
+            opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
         if use_normals:
             normals = torch.tensor(np.asarray(pcd.normals)).float().cuda()
             rots = self.rotation_vector_from_normals(normals)
         else:
             rots = torch.rand((fused_point_cloud.shape[0], 4), device="cuda")
 
-        #opacities = self.inverse_opacity_activation(0.25 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))

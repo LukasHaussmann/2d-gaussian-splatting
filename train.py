@@ -35,7 +35,7 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, time_checkpoints=None):
     first_iter = 0
     #start_time = time.time()
     timer = Timer()
@@ -44,6 +44,12 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
+
+    # Track time checkpoints
+    if time_checkpoints is None:
+        time_checkpoints = []
+    time_checkpoints = sorted(time_checkpoints)
+    saved_time_checkpoints = {}  # Maps time -> iteration for saved checkpoints
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
         gaussians.restore(model_params, opt)
@@ -149,6 +155,22 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 print("Elapsed time: ", timer.get_elapsed_time())
                 scene.save(iteration)
                 timer.start()
+
+            # Save at time checkpoints (multiple checkpoints in a single run)
+            current_time = timer.get_elapsed_time()
+            for tc in time_checkpoints:
+                if tc not in saved_time_checkpoints and current_time >= tc:
+                    timer.pause()
+                    print(f"\n[ITER {iteration}] Saving time checkpoint at {tc}s (actual: {current_time:.1f}s)")
+                    scene.save(iteration)
+                    saved_time_checkpoints[tc] = {"iteration": iteration, "actual_time": current_time}
+                    # Save the time->iteration mapping file
+                    import json
+                    mapping_path = os.path.join(scene.model_path, "time_checkpoints.json")
+                    with open(mapping_path, 'w') as f:
+                        json.dump(saved_time_checkpoints, f, indent=2)
+                    timer.start()
+
             if (opt.time_limit > 0 and timer.get_elapsed_time() >= opt.time_limit):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 print("Elapsed time: ", timer.get_elapsed_time())
@@ -367,6 +389,7 @@ if __name__ == "__main__":
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    parser.add_argument("--time_checkpoints", nargs="+", type=float, default=[], help="Time checkpoints (in seconds) to save model during training")
     args = parser.parse_args(sys.argv[1:])
     args.save_iterations.append(args.iterations)
     
@@ -378,7 +401,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.time_checkpoints)
 
     # All done
     print("\nTraining complete.")

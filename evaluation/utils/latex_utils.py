@@ -59,7 +59,7 @@ def format_metric(
     str
         Formatted metric string
     """
-    if value != value:  # Check for NaN
+    if value is None or value != value:  # Check for None and NaN
         return "-"
 
     formatted = f"{value:.{precision}f}"
@@ -219,8 +219,8 @@ def find_best_and_second(
     Tuple[int, int]
         Indices of best and second-best values (-1 if not found)
     """
-    # Filter out NaN values
-    valid_indices = [i for i, v in enumerate(values) if v == v]
+    # Filter out None and NaN values
+    valid_indices = [i for i, v in enumerate(values) if v is not None and v == v]
 
     if len(valid_indices) == 0:
         return -1, -1

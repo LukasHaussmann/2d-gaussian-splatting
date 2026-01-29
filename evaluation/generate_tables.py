@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 """
-Generate publication-ready LaTeX tables from evaluation results.
-
-Creates tables for:
-1. Time comparison table: Quality at fixed time budgets
-2. SOTA comparison table: Final quality vs published methods
-3. Per-scene breakdown: Individual scene results
-4. Speedup summary: Time to reach quality thresholds
+Generate publication-ready LaTeX tables for DTU benchmark comparison and ablation studies.
 
 Usage:
-    python -m evaluation.generate_tables [--results-dir RESULTS_DIR]
+    # Generate DTU comparison table
+    python -m evaluation.generate_tables [--results-dir RESULTS_DIR] [--output-dir OUTPUT_DIR]
+
+    # Generate ablation study table
+    python -m evaluation.generate_tables --ablation-dir ablation_results/normal_estimation
 """
 
 import argparse
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional
 
-import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -30,121 +27,99 @@ from evaluation.utils.io_utils import (
 )
 from evaluation.utils.latex_utils import (
     format_metric,
-    format_metric_with_std,
-    bold,
-    underline,
-    make_table_header,
-    make_table_footer,
-    make_table_row,
-    escape_latex,
     find_best_and_second,
 )
 
 
-def generate_time_comparison_table(
-    results_dir: Path,
-    output_path: Path
+def generate_ablations_table(
+    ablation_dir: Path,
+    output_path: Path,
+    time_budget: int,
 ) -> str:
     """
-    Generate LaTeX table comparing methods across time budgets.
+    Generate LaTeX table for ablation study results.
 
-    Columns: Method | 1min | 3min | 5min | 10min | 15min
-    Rows for each metric (Accuracy, Completeness, Overall)
+    Rows are experiments, columns are accuracy, completeness, and overall.
+    Values are the mean across all scenes for the specified time budget.
+
+    Args:
+        ablation_dir: Path to ablation results directory (e.g., ablation_results/normal_estimation)
+        output_path: Path to save the LaTeX table
+        time_budget: Time budget in seconds to use for the table
+
+    Returns:
+        LaTeX table string
     """
-    summary_file = results_dir / "results" / "time_comparison_summary.csv"
-
-    if not summary_file.exists():
-        print(f"Warning: Summary file not found: {summary_file}")
+    # Load results CSV
+    results_file = ablation_dir / "results.csv"
+    if not results_file.exists():
+        print(f"Warning: Results file not found: {results_file}")
         return ""
 
-    df = pd.read_csv(summary_file)
-
-    if df.empty:
+    results_df = pd.read_csv(results_file)
+    if results_df.empty:
         return ""
 
-    # Get unique time budgets and methods
-    time_budgets = sorted(df['time_budget'].unique())
-    methods = sorted(df['method'].unique())
+    # Derive experiments from the data
+    ablation_name = ablation_dir.name
+    experiments = results_df['experiment'].unique().tolist()
 
-    # Method display names
-    method_names = {
-        'ours': 'Ours (Fast Init)',
-        'baseline_2dgs': '2DGS Baseline',
-    }
+    if not experiments:
+        print(f"Warning: No experiments found in results")
+        return ""
 
-    # Generate table
-    time_labels = [format_time_budget(t) for t in time_budgets]
-    columns = ["Method", "Metric"] + time_labels
+    # Filter to the specified time budget
+    tb_df = results_df[results_df['time_budget'] == time_budget]
+    if tb_df.empty:
+        available = sorted(results_df['time_budget'].unique().tolist())
+        print(f"Warning: No results for time budget {time_budget}s. Available: {available}")
+        return ""
+
+    # Compute mean metrics for each experiment
+    metrics = ['accuracy', 'completeness', 'overall']
+    table_data = []
+    for exp_name in experiments:
+        exp_df = tb_df[tb_df['experiment'] == exp_name]
+        row_data = {'experiment': exp_name}
+        for metric in metrics:
+            if not exp_df.empty:
+                row_data[metric] = exp_df[metric].mean()
+            else:
+                row_data[metric] = None
+        table_data.append(row_data)
+
+    # Find best and second best for each metric column
+    col_rankings = {}
+    for metric in metrics:
+        col_values = [row.get(metric) for row in table_data]
+        col_rankings[metric] = find_best_and_second(col_values, lower_is_better=True)
+
+    # Generate LaTeX table
+    col_headers = ["Experiment", "Accuracy", "Completeness", "Overall"]
 
     lines = [
-        r"\begin{table}[htbp]",
+        r"\begin{table}[t]",
         r"\centering",
-        r"\caption{Reconstruction quality at different training time budgets on DTU benchmark. "
-        r"Lower is better for all metrics. Best results in \textbf{bold}, second-best \underline{underlined}.}",
-        r"\label{tab:time_comparison}",
-        r"\begin{tabular}{ll" + "c" * len(time_budgets) + "}",
+        f"\\caption{{Ablation study: {ablation_name.replace('_', ' ')}. Chamfer distance (mm) $\\downarrow$ at {time_budget}s.}}",
+        f"\\label{{tab:ablation_{ablation_name}}}",
+        r"\begin{tabular}{lccc}",
         r"\toprule",
-        " & ".join(columns) + r" \\",
+        " & ".join(col_headers) + r" \\",
         r"\midrule",
     ]
 
-    metrics = ['accuracy', 'completeness', 'overall']
-    metric_display = {
-        'accuracy': 'Accuracy $\\downarrow$',
-        'completeness': 'Completeness $\\downarrow$',
-        'overall': 'Overall $\\downarrow$',
-    }
+    # Generate rows
+    for i, row in enumerate(table_data):
+        row_values = [row['experiment'].replace('_', r'\_')]
 
-    for metric in metrics:
-        for method in methods:
-            method_df = df[df['method'] == method]
+        for metric in metrics:
+            val = row.get(metric)
+            best_idx, second_idx = col_rankings[metric]
+            is_best = (i == best_idx)
+            is_second = (i == second_idx)
+            row_values.append(format_metric(val, 3, is_best, is_second))
 
-            row_values = [
-                method_names.get(method, method),
-                metric_display[metric]
-            ]
-
-            # Collect values for ranking
-            values_for_ranking = []
-            all_values = []
-            for t in time_budgets:
-                t_row = method_df[method_df['time_budget'] == t]
-                if not t_row.empty:
-                    mean = t_row[f'{metric}_mean'].values[0]
-                    std = t_row[f'{metric}_std'].values[0]
-                    all_values.append((mean, std))
-                    values_for_ranking.append(mean)
-                else:
-                    all_values.append((np.nan, np.nan))
-                    values_for_ranking.append(np.nan)
-
-            # Find best across methods for each time budget
-            for i, (mean, std) in enumerate(all_values):
-                # Get all method values for this time budget
-                t = time_budgets[i]
-                all_method_values = []
-                for m in methods:
-                    m_df = df[(df['method'] == m) & (df['time_budget'] == t)]
-                    if not m_df.empty:
-                        all_method_values.append(m_df[f'{metric}_mean'].values[0])
-                    else:
-                        all_method_values.append(np.nan)
-
-                best_idx, second_idx = find_best_and_second(all_method_values, lower_is_better=True)
-                method_idx = methods.index(method)
-
-                is_best = (method_idx == best_idx)
-                is_second = (method_idx == second_idx)
-
-                if np.isnan(mean):
-                    row_values.append("-")
-                else:
-                    row_values.append(format_metric_with_std(mean, std, 2, is_best, is_second))
-
-            lines.append(" & ".join(row_values) + r" \\")
-
-        if metric != metrics[-1]:
-            lines.append(r"\midrule")
+        lines.append(" & ".join(row_values) + r" \\")
 
     lines.extend([
         r"\bottomrule",
@@ -154,368 +129,324 @@ def generate_time_comparison_table(
 
     table_str = "\n".join(lines)
 
-    # Save to file
     ensure_dir(output_path.parent)
     output_path.write_text(table_str)
-    print(f"Saved time comparison table to: {output_path}")
+    print(f"Saved ablation table to: {output_path}")
 
     return table_str
 
 
-def generate_sota_comparison_table(
+def load_2dgs_reproduced_metrics(
+    experiments_dir: Path,
+    iteration: int = 30000,
+) -> dict:
+    """
+    Load per-scene metrics from 2DGS experiments directory.
+
+    Args:
+        experiments_dir: Path to 2DGS experiments directory (e.g., ~/2d-gaussian-splatting/experiments)
+        iteration: Iteration number to load metrics for (default: 30000)
+
+    Returns:
+        Dict mapping scan names to metric dicts with 'accuracy', 'completeness', 'overall'
+    """
+    experiments_dir = Path(experiments_dir).expanduser()
+    if not experiments_dir.exists():
+        print(f"Warning: 2DGS experiments directory not found: {experiments_dir}")
+        return {}
+
+    results = {}
+    for scene_dir in experiments_dir.iterdir():
+        if not scene_dir.is_dir() or not scene_dir.name.startswith("scan"):
+            continue
+
+        metrics_file = scene_dir / "metrics.csv"
+        if not metrics_file.exists():
+            continue
+
+        try:
+            df = pd.read_csv(metrics_file)
+            row = df[df['iterations'] == iteration]
+            if not row.empty:
+                results[scene_dir.name] = row['overall'].iloc[0]
+        except Exception as e:
+            print(f"Warning: Could not read {metrics_file}: {e}")
+
+    return results
+
+
+def load_metrics_from_evaluation(
     results_dir: Path,
-    output_path: Path
+    method: str,
+    time_budget: int,
+) -> dict:
+    """
+    Load per-scene metrics from the evaluation pipeline results.
+
+    Args:
+        results_dir: Root evaluation results directory
+        method: Method name (e.g., 'ours', 'baseline_2dgs')
+        time_budget: Time budget in seconds
+
+    Returns:
+        Dict mapping scan names to overall chamfer distance values
+    """
+    metrics_file = results_dir / "time_based" / method / f"metrics_{time_budget}s.csv"
+    if not metrics_file.exists():
+        print(f"Warning: Metrics file not found: {metrics_file}")
+        return {}
+
+    try:
+        df = pd.read_csv(metrics_file)
+        if 'overall' not in df.columns or 'scan' not in df.columns:
+            print(f"Warning: Missing required columns in {metrics_file}")
+            return {}
+        return {row['scan']: row['overall'] for _, row in df.iterrows()}
+    except Exception as e:
+        print(f"Warning: Could not read {metrics_file}: {e}")
+        return {}
+
+
+def generate_dtu_comparison_table(
+    results_dir: Path,
+    output_path: Path,
+    time_budget: int = 900,
+    methods_to_include: List[str] = None,
 ) -> str:
     """
-    Generate LaTeX table comparing with state-of-the-art methods.
+    Generate paper-style DTU benchmark comparison table.
 
-    Includes neural implicit methods, gaussian splatting methods, and MVS methods.
+    Methods as rows, scans as columns, with Mean and Time at the end.
+    Standard format used in papers like 2DGS, GOF, NeuS, etc.
+
+    Args:
+        results_dir: Path to evaluation results directory
+        output_path: Path to save the LaTeX table
+        time_budget: Time budget in seconds for comparing methods
+        methods_to_include: List of methods to include (default: SOTA + Ours + 2DGS*)
     """
-    sota_file = results_dir / "results" / "sota_comparison.csv"
-    sota_baselines_csv = results_dir / "results" / "sota_baselines.csv"
+    if methods_to_include is None:
+        methods_to_include = ["3DGS", "SuGaR", "2DGS", "2DGS*", "Ours"]
 
-    if sota_file.exists():
-        df = pd.read_csv(sota_file)
-    elif sota_baselines_csv.exists():
-        df = pd.read_csv(sota_baselines_csv)
-    else:
-        # Load from YAML config directly
-        sota_baselines_path = get_sota_baselines_path()
-        if not sota_baselines_path.exists():
-            print("Warning: No SOTA data found")
-            return ""
-
-        sota_config = load_config(sota_baselines_path)
-        records = []
-        for method_name, data in sota_config.get('methods', {}).items():
-            records.append({
-                'method': method_name,
-                'accuracy': data.get('accuracy', np.nan),
-                'completeness': data.get('completeness', np.nan),
-                'overall': data.get('overall', np.nan),
-                'category': data.get('category', 'other'),
-            })
-        df = pd.DataFrame(records)
-
-    if df.empty:
+    # Load SOTA baselines config
+    sota_baselines_path = get_sota_baselines_path()
+    if not sota_baselines_path.exists():
+        print("Warning: SOTA baselines config not found")
         return ""
 
-    # Sort by overall score
-    df = df.sort_values('overall')
+    sota = load_config(sota_baselines_path)
+    sota_methods = sota.get('methods', {})
 
-    columns = ["Method", "Accuracy $\\downarrow$", "Completeness $\\downarrow$", "Overall $\\downarrow$"]
+    # Helper to load per-scene data from config
+    def load_perscene_from_config(key):
+        data = sota.get(key, {})
+        return {f"scan{k.replace('scan', '')}": v['overall']
+                for k, v in data.items() if v.get('overall') is not None}
 
-    lines = [
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\caption{Comparison with state-of-the-art methods on DTU benchmark (15 scenes). "
-        r"Chamfer distance metrics (mm). Lower is better.}",
-        r"\label{tab:sota_comparison}",
-        r"\begin{tabular}{lccc}",
-        r"\toprule",
-        " & ".join(columns) + r" \\",
-        r"\midrule",
-    ]
-
-    metrics = ['accuracy', 'completeness', 'overall']
-
-    # Find best and second best for each metric
-    best_indices = {}
-    second_indices = {}
-    for metric in metrics:
-        values = df[metric].tolist()
-        best_indices[metric], second_indices[metric] = find_best_and_second(values, lower_is_better=True)
-
-    # Group by category if available
-    if 'category' in df.columns:
-        categories = ['neural_implicit', 'gaussian_splatting', 'mvs']
-        category_names = {
-            'neural_implicit': 'Neural Implicit',
-            'gaussian_splatting': 'Gaussian Splatting',
-            'mvs': 'Multi-View Stereo',
-        }
-
-        for cat in categories:
-            cat_df = df[df['category'] == cat]
-            if cat_df.empty:
-                continue
-
-            lines.append(f"\\multicolumn{{4}}{{l}}{{\\textit{{{category_names.get(cat, cat)}}}}} \\\\")
-
-            for idx, row in cat_df.iterrows():
-                row_values = [escape_latex(row['method'])]
-                global_idx = df.index.get_loc(idx)
-
-                for metric in metrics:
-                    is_best = (global_idx == best_indices[metric])
-                    is_second = (global_idx == second_indices[metric])
-                    row_values.append(format_metric(row[metric], 2, is_best, is_second))
-
-                lines.append(" & ".join(row_values) + r" \\")
-
-            lines.append(r"\midrule")
-
-        # Remove last midrule
-        lines[-1] = r"\bottomrule"
-    else:
-        # Simple table without categories
-        for idx, row in df.iterrows():
-            row_values = [escape_latex(row['method'])]
-            global_idx = df.index.get_loc(idx)
-
-            for metric in metrics:
-                is_best = (global_idx == best_indices[metric])
-                is_second = (global_idx == second_indices[metric])
-                row_values.append(format_metric(row[metric], 2, is_best, is_second))
-
-            lines.append(" & ".join(row_values) + r" \\")
-
-        lines.append(r"\bottomrule")
-
-    lines.extend([
-        r"\end{tabular}",
-        r"\end{table}",
-    ])
-
-    table_str = "\n".join(lines)
-
-    ensure_dir(output_path.parent)
-    output_path.write_text(table_str)
-    print(f"Saved SOTA comparison table to: {output_path}")
-
-    return table_str
-
-
-def generate_per_scene_table(
-    results_dir: Path,
-    output_path: Path
-) -> str:
-    """
-    Generate LaTeX table with per-scene breakdown.
-    """
-    per_scene_file = results_dir / "results" / "per_scene_comparison.csv"
-
-    if not per_scene_file.exists():
-        print(f"Warning: Per-scene file not found: {per_scene_file}")
-        return ""
-
-    df = pd.read_csv(per_scene_file)
-
-    if df.empty:
-        return ""
-
-    # Determine methods from columns
-    methods = []
-    for col in df.columns:
-        if 'ours' in col.lower():
-            methods.append('ours')
-        elif 'baseline' in col.lower():
-            methods.append('baseline_2dgs')
-    methods = list(set(methods))
-
-    method_names = {
-        'ours': 'Ours',
-        'baseline_2dgs': '2DGS',
+    # Load per-scene data for SOTA methods from config
+    perscene_data = {
+        "3DGS": load_perscene_from_config('per_scene_3dgs'),
+        "SuGaR": load_perscene_from_config('per_scene_sugar'),
+        "2DGS": load_perscene_from_config('per_scene_2dgs'),
     }
 
-    # Create table with scene rows and method columns for overall metric
-    columns = ["Scene"] + [method_names.get(m, m) for m in methods]
+    # Load 2DGS 30k reproduced results
+    dgs_30k_data = load_2dgs_reproduced_metrics(
+        Path("~/2d-gaussian-splatting/experiments").expanduser()
+    )
+    if dgs_30k_data:
+        perscene_data["2DGS 30k"] = dgs_30k_data
+    else:
+        print("Warning: No '2DGS 30k' reproduced metrics found")
+        perscene_data["2DGS 30k"] = {}
+
+    # Load "Ours" results from evaluation pipeline
+    ours_data = load_metrics_from_evaluation(results_dir, "ours", time_budget)
+    if ours_data:
+        perscene_data["Ours"] = ours_data
+    else:
+        print(f"Warning: No 'ours' metrics found for time budget {time_budget}s")
+        perscene_data["Ours"] = {}
+
+    # Load 2DGS baseline with same runtime from evaluation (2DGS*)
+    baseline_data = load_metrics_from_evaluation(results_dir, "baseline_2dgs", time_budget)
+    if baseline_data:
+        perscene_data["2DGS*"] = baseline_data
+    else:
+        print(f"Warning: No 'baseline_2dgs' metrics found for time budget {time_budget}s")
+        perscene_data["2DGS*"] = {}
+
+    # Format runtime string
+    runtime_str = format_time_budget(time_budget)
+
+    # Load runtime from config for SOTA methods
+    runtimes = {
+        "Ours": runtime_str,
+        "2DGS*": runtime_str,  # Same runtime as Ours
+        "2DGS 30k": "13min",  # Reproduced 2DGS at 30k iterations
+    }
+    for method_name in methods_to_include:
+        if method_name not in runtimes:
+            method_info = sota_methods.get(method_name, {})
+            runtimes[method_name] = method_info.get('runtime', '-')
+
+    # Determine available scans (from Ours data, fallback to standard DTU scans)
+    if perscene_data["Ours"]:
+        available_scans = sorted([int(s.replace('scan', '')) for s in perscene_data["Ours"].keys()])
+    else:
+        # Fallback to standard DTU scans
+        available_scans = [24, 37, 40, 55, 63, 65, 69, 83, 97, 105, 106, 110, 114, 118, 122]
+
+    scan_cols = [str(s) for s in available_scans]
+
+    # Build table data
+    table_data = []
+    for method_name in methods_to_include:
+        row_data = {'name': method_name, 'time': runtimes.get(method_name, '-')}
+        values = []
+
+        method_perscene = perscene_data.get(method_name, {})
+        for scan_id in available_scans:
+            scan_key = f"scan{scan_id}"
+            val = method_perscene.get(scan_key)
+            row_data[str(scan_id)] = val
+            if val is not None:
+                values.append(val)
+
+        # Calculate mean from available data, or use reported mean
+        if values:
+            row_data['mean'] = sum(values) / len(values)
+        else:
+            # Use reported mean from config
+            row_data['mean'] = sota_methods.get(method_name, {}).get('overall')
+
+        table_data.append(row_data)
+
+    # Generate LaTeX table
+    n_scans = len(scan_cols)
+    col_headers = ["Method"] + scan_cols + ["Mean", "Time"]
 
     lines = [
-        r"\begin{table}[htbp]",
+        r"\begin{table*}[t]",
         r"\centering",
-        r"\caption{Per-scene reconstruction quality (Overall Chamfer distance, mm). Lower is better.}",
-        r"\label{tab:per_scene}",
-        r"\begin{tabular}{l" + "c" * len(methods) + "}",
+        r"\caption{Quantitative results on DTU dataset. We report the Chamfer distance (mm) $\downarrow$.}",
+        r"\label{tab:dtu_comparison}",
+        r"\setlength{\tabcolsep}{4pt}",
+        r"\begin{tabular}{l" + "c" * n_scans + "cc}",
         r"\toprule",
-        " & ".join(columns) + r" \\",
+        " & ".join(col_headers) + r" \\",
         r"\midrule",
     ]
 
-    # Find overall columns for each method
-    overall_cols = {m: None for m in methods}
-    for col in df.columns:
-        for m in methods:
-            if 'overall' in col.lower() and m in col.lower():
-                overall_cols[m] = col
-
-    for _, row in df.iterrows():
-        scene = row.get('scan', row.iloc[0])
-        row_values = [escape_latex(str(scene))]
-
-        method_vals = []
-        for m in methods:
-            col = overall_cols.get(m)
-            if col and col in df.columns:
-                method_vals.append(row[col])
+    # Find best and second best for each column
+    col_rankings = {}
+    for col in scan_cols + ['mean']:
+        col_values = []
+        for row in table_data:
+            if col == 'mean':
+                col_values.append(row['mean'])
             else:
-                method_vals.append(np.nan)
+                col_values.append(row.get(col))
+        col_rankings[col] = find_best_and_second(col_values, lower_is_better=True)
 
-        best_idx, second_idx = find_best_and_second(method_vals, lower_is_better=True)
+    # Generate rows
+    for i, row in enumerate(table_data):
+        row_values = [row['name']]
 
-        for i, val in enumerate(method_vals):
+        # Per-scene values
+        for scan_id in scan_cols:
+            val = row.get(scan_id)
+            best_idx, second_idx = col_rankings[scan_id]
             is_best = (i == best_idx)
             is_second = (i == second_idx)
             row_values.append(format_metric(val, 2, is_best, is_second))
 
-        lines.append(" & ".join(row_values) + r" \\")
+        # Mean
+        best_idx, second_idx = col_rankings['mean']
+        is_best = (i == best_idx)
+        is_second = (i == second_idx)
+        row_values.append(format_metric(row['mean'], 2, is_best, is_second))
 
-    # Add mean row
-    lines.append(r"\midrule")
-    mean_values = [escape_latex("Mean")]
-    for m in methods:
-        col = overall_cols.get(m)
-        if col and col in df.columns:
-            mean_values.append(format_metric(df[col].mean(), 2))
-        else:
-            mean_values.append("-")
-    lines.append(" & ".join(mean_values) + r" \\")
-
-    lines.extend([
-        r"\bottomrule",
-        r"\end{tabular}",
-        r"\end{table}",
-    ])
-
-    table_str = "\n".join(lines)
-
-    ensure_dir(output_path.parent)
-    output_path.write_text(table_str)
-    print(f"Saved per-scene table to: {output_path}")
-
-    return table_str
-
-
-def generate_speedup_table(
-    results_dir: Path,
-    output_path: Path,
-    quality_thresholds: List[float] = [0.60, 0.55, 0.50, 0.45]
-) -> str:
-    """
-    Generate table showing time to reach quality thresholds.
-
-    Shows speedup factor of our method vs baseline.
-    """
-    time_results_file = results_dir / "results" / "time_based_results.csv"
-
-    if not time_results_file.exists():
-        print(f"Warning: Time results file not found: {time_results_file}")
-        return ""
-
-    df = pd.read_csv(time_results_file)
-
-    if df.empty:
-        return ""
-
-    methods = df['method'].unique()
-    time_budgets = sorted(df['time_budget'].unique())
-
-    columns = ["Target Quality"] + ["Ours", "2DGS Baseline", "Speedup"]
-
-    lines = [
-        r"\begin{table}[htbp]",
-        r"\centering",
-        r"\caption{Time to reach quality thresholds (Overall Chamfer distance). "
-        r"Speedup shows how much faster our method reaches the target quality.}",
-        r"\label{tab:speedup}",
-        r"\begin{tabular}{lccc}",
-        r"\toprule",
-        " & ".join(columns) + r" \\",
-        r"\midrule",
-    ]
-
-    for threshold in quality_thresholds:
-        row_values = [f"$\\leq$ {threshold:.2f}"]
-
-        times = {}
-        for method in ['ours', 'baseline_2dgs']:
-            method_df = df[df['method'] == method]
-
-            # Find first time budget that achieves threshold
-            time_to_reach = None
-            for t in time_budgets:
-                t_df = method_df[method_df['time_budget'] == t]
-                if not t_df.empty:
-                    mean_overall = t_df['overall'].mean()
-                    if mean_overall <= threshold:
-                        time_to_reach = t
-                        break
-
-            times[method] = time_to_reach
-
-        # Format times
-        for method in ['ours', 'baseline_2dgs']:
-            t = times.get(method)
-            if t is not None:
-                row_values.append(format_time_budget(t))
-            else:
-                row_values.append(">15min")
-
-        # Compute speedup
-        if times.get('ours') and times.get('baseline_2dgs'):
-            speedup = times['baseline_2dgs'] / times['ours']
-            row_values.append(f"{speedup:.1f}$\\times$")
-        elif times.get('ours') and not times.get('baseline_2dgs'):
-            row_values.append("$\\infty$")
-        else:
-            row_values.append("-")
+        # Time
+        row_values.append(row['time'])
 
         lines.append(" & ".join(row_values) + r" \\")
 
     lines.extend([
         r"\bottomrule",
         r"\end{tabular}",
-        r"\end{table}",
+        r"\end{table*}",
     ])
 
     table_str = "\n".join(lines)
 
     ensure_dir(output_path.parent)
     output_path.write_text(table_str)
-    print(f"Saved speedup table to: {output_path}")
+    print(f"Saved DTU comparison table to: {output_path}")
 
     return table_str
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Generate LaTeX tables from evaluation results")
+    parser = argparse.ArgumentParser(description="Generate LaTeX table from evaluation results")
     parser.add_argument(
         "--results-dir",
         type=str,
-        default="evaluation_results/fast_init_convergence_study",
+        default="evaluation_results/estimated_normals_convergence_study",
         help="Path to evaluation results directory"
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default=None,
-        help="Output directory for tables (default: results_dir/tables)"
+        help="Output directory for table (default: results_dir/tables)"
+    )
+    parser.add_argument(
+        "--time-budget",
+        type=int,
+        default=900,
+        help="Time budget in seconds for method comparison (default: 900)"
+    )
+    parser.add_argument(
+        "--ablation-dir",
+        type=str,
+        default=None,
+        help="Path to ablation results directory (e.g., ablation_results/normal_estimation)"
     )
     args = parser.parse_args()
 
-    results_dir = Path(args.results_dir)
-    output_dir = Path(args.output_dir) if args.output_dir else results_dir / "tables"
-    ensure_dir(output_dir)
+    # Generate ablation table if ablation-dir is specified
+    if args.ablation_dir:
+        ablation_dir = Path(args.ablation_dir)
+        output_dir = Path(args.output_dir) if args.output_dir else ablation_dir / "tables"
+        ensure_dir(output_dir)
 
-    print(f"Generating tables from: {results_dir}")
-    print(f"Output directory: {output_dir}")
+        print(f"Ablation directory: {ablation_dir}")
+        print(f"Output directory: {output_dir}")
+        print(f"Time budget: {args.time_budget}s")
+        print(f"\n--- Generating Ablation Table for {ablation_dir.name} ---")
+        generate_ablations_table(
+            ablation_dir,
+            output_dir / f"ablation_{ablation_dir.name}.tex",
+            time_budget=args.time_budget,
+        )
+    else:
+        # Generate DTU comparison table
+        results_dir = Path(args.results_dir)
+        output_dir = Path(args.output_dir) if args.output_dir else results_dir / "tables"
+        ensure_dir(output_dir)
 
-    # Generate all tables
-    print("\n--- Generating Time Comparison Table ---")
-    generate_time_comparison_table(results_dir, output_dir / "time_comparison.tex")
+        print(f"Results directory: {results_dir}")
+        print(f"Output directory: {output_dir}")
+        print(f"Time budget: {args.time_budget}s")
+        print("\n--- Generating DTU Comparison Table ---")
+        generate_dtu_comparison_table(
+            results_dir,
+            output_dir / "dtu_comparison.tex",
+            time_budget=args.time_budget,
+        )
 
-    print("\n--- Generating SOTA Comparison Table ---")
-    generate_sota_comparison_table(results_dir, output_dir / "sota_comparison.tex")
-
-    print("\n--- Generating Per-Scene Table ---")
-    generate_per_scene_table(results_dir, output_dir / "per_scene.tex")
-
-    print("\n--- Generating Speedup Table ---")
-    generate_speedup_table(results_dir, output_dir / "speedup.tex")
-
-    print(f"\n{'='*60}")
-    print(f"Table generation complete. Files saved to: {output_dir}")
-    print(f"{'='*60}")
+    print(f"\nTable generation complete. File saved to: {output_dir}")
 
 
 if __name__ == "__main__":
